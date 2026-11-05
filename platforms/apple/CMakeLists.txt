@@ -101,7 +101,10 @@ add_library(TrackerApple STATIC
     hal/InputApple.cpp
     hal/StubsApple.cpp
     hal/interrupts_apple.cpp
-    display/Ft812Model.cpp)
+    display/Ft812Model.cpp
+    display/CoproDecoder.cpp
+    display/DlDecoder.cpp
+    display/CpuRaster.cpp)
 target_include_directories(TrackerApple PUBLIC hal display)
 target_link_libraries(TrackerApple PUBLIC TrackerCore)
 target_compile_options(TrackerApple PRIVATE
@@ -111,6 +114,17 @@ target_compile_options(TrackerApple PRIVATE
 add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
 target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(apple_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
+
+# Headless runner: boots the core, dumps the last frame (--screenshot); later --tone, --metal.
+add_executable(trackerce-headless tools/trackerce_headless.cpp)
+target_compile_options(trackerce-headless PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra;SHELL:-include cstdint>")
+target_link_libraries(trackerce-headless PRIVATE PolySynthStub TrackerApple TrackerCore)
+
+# FT812 model: coprocessor execution, display-list decoding, reference rasteriser.
+add_executable(display_tests tests/test_display_decode.cpp)
+target_compile_options(display_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(display_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
 
 add_executable(filesystem_tests tests/test_filesystem.cpp)
 target_compile_options(filesystem_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
@@ -122,3 +136,4 @@ add_test(NAME dsp_tests COMMAND dsp_tests)
 add_test(NAME synth_stub_tests COMMAND synth_stub_tests)
 add_test(NAME filesystem_tests COMMAND filesystem_tests)
 add_test(NAME apple_tests COMMAND apple_tests)
+add_test(NAME display_tests COMMAND display_tests)

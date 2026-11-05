@@ -315,3 +315,26 @@ TEST_CASE("stack watermark symbols bound a real region")
     volatile uint8_t probe = top[-1];
     (void)probe;
 }
+
+// Declared last on purpose (Catch2 runs in declaration order): once the main UI is up, the
+// pattern editor consumes file-manager end states (fPatternEdit.cpp update), which the synth
+// round-trip test above polls for.
+TEST_CASE("boot produces frames")
+{
+    auto& b = booted();
+    // The start screen leaves only when it sees fmLoadEnd (interfaceMisc.cpp
+    // detectProjectLoadState); the round-trip test cleared that status. Reopen the workspace
+    // project so it arrives again (a no-op unless the file manager is idle).
+    newFileManager.openProjectFromWorkspace();
+    // The UI is wall-clock driven: the start screen (logo + progress bar, 2 prims) stays up for
+    // at least ~2 s (interfaceMisc.cpp refreshStartScreen: 40 ms ticks, progress capped at
+    // 2 %/tick). Pace the updates so 500 of them span ~4 s of wall time.
+    for (int i = 0; i < 500; i++)
+    {
+        Tracker::getInstance()->update();
+        usleep(8000);
+    }
+    auto f = b.platform.display().latestFrame();
+    REQUIRE(f);
+    REQUIRE(f->prims.size() > 50);
+}
