@@ -66,11 +66,6 @@ add_library(catch2_vendored STATIC ${CATCH_SRCS})
 target_include_directories(catch2_vendored PUBLIC ${REPO_ROOT}/util/3rdparty)
 target_compile_options(catch2_vendored PRIVATE -std=gnu++20 -w)
 
-# EXCLUDE_FROM_ALL until the platform layer supplies the remaining symbols.
-add_executable(apple_tests EXCLUDE_FROM_ALL tests/test_smoke.cpp)
-target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
-target_link_libraries(apple_tests PRIVATE TrackerCore catch2_vendored)
-
 # dspinst.h host intrinsics: header + Catch2 only, built under UBSan (no recovery).
 add_executable(dsp_tests tests/test_dspinst.cpp)
 target_include_directories(dsp_tests PRIVATE ${CORE_DIR}/libs/Audio/utility)
@@ -95,18 +90,27 @@ target_compile_options(PolySynthStub PRIVATE
 
 add_executable(synth_stub_tests tests/test_synth_stub.cpp)
 target_compile_options(synth_stub_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
-target_link_libraries(synth_stub_tests PRIVATE PolySynthStub TrackerCore catch2_vendored)
-# test_link_stubs.cpp: TEMPORARY platform-symbol stand-ins until Task 4 (HAL) lands.
-target_sources(synth_stub_tests PRIVATE tests/test_link_stubs.cpp)
+target_link_libraries(synth_stub_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
 
-# --- Apple HAL (POSIX FileSystem + virtual sector map; Task 4 adds the rest of PlatformApple) ---
+# --- Apple HAL (PlatformApple + POSIX FileSystem + virtual sector map + display model) ---
 add_library(TrackerApple STATIC
     hal/FileSystemPosix.cpp
-    hal/VirtualSectorMap.cpp)
-target_include_directories(TrackerApple PUBLIC hal)
+    hal/VirtualSectorMap.cpp
+    hal/PlatformApple.cpp
+    hal/TimerApple.cpp
+    hal/InputApple.cpp
+    hal/StubsApple.cpp
+    hal/interrupts_apple.cpp
+    display/Ft812Model.cpp)
+target_include_directories(TrackerApple PUBLIC hal display)
 target_link_libraries(TrackerApple PUBLIC TrackerCore)
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
+
+# Whole-core headless boot + platform tests (smoke, boot, input, config, synth round trip).
+add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
+target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(apple_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
 
 add_executable(filesystem_tests tests/test_filesystem.cpp)
 target_compile_options(filesystem_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
@@ -117,3 +121,4 @@ enable_testing()
 add_test(NAME dsp_tests COMMAND dsp_tests)
 add_test(NAME synth_stub_tests COMMAND synth_stub_tests)
 add_test(NAME filesystem_tests COMMAND filesystem_tests)
+add_test(NAME apple_tests COMMAND apple_tests)
