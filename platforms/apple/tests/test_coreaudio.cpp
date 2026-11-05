@@ -6,6 +6,7 @@
 #include "test_coreaudio_common.h"
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -228,4 +229,61 @@ TEST_CASE("test_external_rate_change_uses_converter", "[hardware]")
     out.stop();
     rt.stop();
     REQUIRE(followed);
+}
+
+// Hang in close/teardown (DestroyIOProcID stuck in the HAL proxy): the destructor still returns
+// within its bound.
+TEST_CASE("test_teardown_hang_destructor_returns", "[hardware]")
+{
+    FakeTracker fake;
+    AudioRuntime rt(&fake, nullptr);
+    auto out = std::make_unique<CoreAudioOutput>(rt);
+    REQUIRE(out->open(CoreAudioOutput::defaultOutputDevice()));
+    rt.start();
+    REQUIRE(out->start());
+    REQUIRE(waitUntil([&] { return out->cycles() > 10; }, 2000ms));
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    CoreAudioOutputTestHooks h;
+    h.beforeTeardown = [release](AudioDeviceID) { while (!release->load()) std::this_thread::sleep_for(5ms); };
+    CoreAudioOutputTestAccess::setHooks(*out, h);
+    // hooks are read at build time: reopen so the live device carries the hook
+    REQUIRE(out->open(CoreAudioOutput::defaultOutputDevice()));
+    REQUIRE(out->start());
+    const auto t0 = std::chrono::steady_clock::now();
+    out.reset();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    release->store(true);
+    rt.stop();
+    REQUIRE(ms < 2500);
+}
+
+// Hang in teardown during stall-triggered fallback: the fallback gives up on the wedged device
+// within the bound, reports a status, and the destructor still returns.
+TEST_CASE("test_teardown_hang_during_stall_fallback", "[hardware]")
+{
+    FakeTracker fake;
+    AudioRuntime rt(&fake, nullptr);
+    auto out = std::make_unique<CoreAudioOutput>(rt);
+    StatusLog log;
+    log.attach(*out);
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    CoreAudioOutputTestHooks h;
+    h.beforeTeardown = [release](AudioDeviceID) { while (!release->load()) std::this_thread::sleep_for(5ms); };
+    CoreAudioOutputTestAccess::setHooks(*out, h);
+    REQUIRE(out->open(CoreAudioOutput::defaultOutputDevice()));
+    rt.start();
+    REQUIRE(out->start());
+    REQUIRE(waitUntil([&] { return out->cycles() > 10; }, 2000ms));
+    const size_t n0 = log.count();
+    CoreAudioOutputTestAccess::freezeWatchdogClock(*out, true);
+    // stall detected after 1 s, then at most ~2 s for the wedged teardown, then the chain
+    REQUIRE(waitUntil([&] { return log.count() > n0; }, 6000ms));
+    CoreAudioOutputTestAccess::freezeWatchdogClock(*out, false);
+    REQUIRE(CoreAudioOutputTestAccess::isUnresponsive(*out, CoreAudioOutput::defaultOutputDevice()));
+    const auto t0 = std::chrono::steady_clock::now();
+    out.reset();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    release->store(true);
+    rt.stop();
+    REQUIRE(ms < 2500);
 }

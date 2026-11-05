@@ -190,6 +190,7 @@ struct Dev
     void* wg = nullptr;
     std::atomic<bool> started{ false };
     bool torn = false;
+    std::function<void(AudioDeviceID)> onTeardown; // test hook
     void* listenCtx = nullptr; // weak_ptr<Impl>* (deliberately leaked: see addListeners)
 
     void removeListeners();
@@ -199,6 +200,8 @@ struct Dev
             return;
         torn = true;
         rt.store(nullptr);
+        if (onTeardown)
+            onTeardown(id);
         removeListeners();
         if (unit)
         {
@@ -555,10 +558,11 @@ OSStatus CoreAudioOutput::Impl::renderCb(void* ref, AudioUnitRenderActionFlags*,
 
 CoreAudioOutput::Impl::Err CoreAudioOutput::Impl::build(AudioDeviceID id, uint8_t l, uint8_t r, bool requestRate, std::shared_ptr<Dev>& out)
 {
-    std::function<void(AudioDeviceID)> before;
+    std::function<void(AudioDeviceID)> before, beforeTear;
     {
         std::lock_guard<std::mutex> g(mtx);
         before = hooks.beforeOpen;
+        beforeTear = hooks.beforeTeardown;
     }
     if (before)
         before(id);
@@ -606,6 +610,7 @@ CoreAudioOutput::Impl::Err CoreAudioOutput::Impl::build(AudioDeviceID id, uint8_
     d->id = id;
     d->name = deviceNameOf(id);
     d->sh = sh;
+    d->onTeardown = beforeTear;
     d->channels = devCh;
     d->lc = l;
     d->rc = r;

@@ -128,6 +128,7 @@ struct CoreAudioOutputTestHooks
     std::function<bool(AudioDeviceID)> alive;      // replaces the DeviceIsAlive property read
     std::function<AudioDeviceID()> defaultDevice;  // replaces the system default lookup
     std::function<AudioDeviceID()> builtinDevice;  // replaces the built-in lookup
+    std::function<void(AudioDeviceID)> beforeTeardown; // first thing in a device's close; may block forever
 };
 
 struct CoreAudioOutputTestAccess
