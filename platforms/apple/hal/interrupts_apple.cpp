@@ -1,31 +1,24 @@
-// Interrupt control for the host. There are no interrupts: the core's critical sections are
-// recorded as nesting counters. Task 6 forwards these to AudioRuntime (a mutex / audio gate).
-#include <atomic>
-
-namespace
-{
-std::atomic<int> gGlobalIrqDisableDepth{ 0 };
-std::atomic<int> gAudioIrqDisableDepth{ 0 };
-} // namespace
+// Interrupt control for the host: both masking pairs forward to AudioRuntime, which shares one
+// nesting depth between them, holds the render thread (the "audio interrupt") off while it is
+// > 0, and ignores them on the render thread itself. See runtime/AudioRuntime.h.
+#include "AudioRuntime.h"
 
 void platformDisableGlobalInterrupts()
 {
-    gGlobalIrqDisableDepth++;
+    AudioRuntime::irqDisable();
 }
 
 void platformEnableGlobalInterrupts()
 {
-    if (gGlobalIrqDisableDepth > 0)
-        gGlobalIrqDisableDepth--;
+    AudioRuntime::irqEnable();
 }
 
 void disableAudioInterrupt()
 {
-    gAudioIrqDisableDepth++;
+    AudioRuntime::irqDisable();
 }
 
 void enableAudioInterrupt()
 {
-    if (gAudioIrqDisableDepth > 0)
-        gAudioIrqDisableDepth--;
+    AudioRuntime::irqEnable();
 }

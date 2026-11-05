@@ -101,26 +101,41 @@ add_library(TrackerApple STATIC
     hal/InputApple.cpp
     hal/StubsApple.cpp
     hal/interrupts_apple.cpp
+    runtime/AudioRuntime.cpp
     display/Ft812Model.cpp
     display/CoproDecoder.cpp
     display/DlDecoder.cpp
     display/CpuRaster.cpp
     display/Bitmaps.cpp
     display/ImageDecode.cpp)
-target_include_directories(TrackerApple PUBLIC hal display)
+target_include_directories(TrackerApple PUBLIC hal display runtime)
 # ImageIO/CoreGraphics: CMD_LOADIMAGE JPEG/PNG decoding only (also available on iOS).
 target_link_libraries(TrackerApple PUBLIC TrackerCore
     "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
 
+# operator new hook for AudioRuntime's render-thread allocation guard. Linked only into binaries
+# that want it (a test may define its own operator new instead).
+add_library(TrackerAllocGuard OBJECT runtime/AllocGuardNew.cpp)
+target_link_libraries(TrackerAllocGuard PUBLIC TrackerCore)
+target_include_directories(TrackerAllocGuard PRIVATE hal display runtime)
+target_compile_options(TrackerAllocGuard PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
+
+# AudioRuntime (tracker + render threads) against a fake Tracker.
+add_executable(runtime_tests tests/test_runtime.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
+target_compile_options(runtime_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(runtime_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
 # Whole-core headless boot + platform tests (smoke, boot, input, config, synth round trip).
 add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
 target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(apple_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
 
-# Headless runner: boots the core, dumps the last frame (--screenshot); later --tone, --metal.
-add_executable(trackerce-headless tools/trackerce_headless.cpp)
+# Headless runner: boots the core, dumps the last frame (--screenshot), runs it under AudioRuntime
+# (--audio-seconds); later --tone, --metal.
+add_executable(trackerce-headless tools/trackerce_headless.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
 target_compile_options(trackerce-headless PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra;SHELL:-include cstdint>")
 target_link_libraries(trackerce-headless PRIVATE PolySynthStub TrackerApple TrackerCore)
@@ -143,3 +158,4 @@ add_test(NAME apple_tests COMMAND apple_tests)
 # Wall-clock boot to the main UI (~4 s), alone in its own process; hidden from apple_tests.
 add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
 add_test(NAME display_tests COMMAND display_tests)
+add_test(NAME runtime_tests COMMAND runtime_tests)
