@@ -26,3 +26,7 @@ Changes to `core/` made for the Apple host build. *neutral* means the hardware c
 - **Patch folder layout is unconfirmed.** The folder-structured store uses `Patches/<typeId>/<name>.patch`
   (decimal instrument type id) and the flat store uses `<name>.patch`. This is a best guess from the
   PolySynth headers, not checked against a real SD card, so a hardware `Patches/` tree may not be listed.
+- **Streamed samples moved or replaced while loaded.** The virtual SD sector map reopens a sample by
+  path when its descriptor is evicted from a 32-entry cache. If the file was renamed away or replaced
+  by a different file since it was registered, streaming reads of it fail (silence) until the
+  instrument is reloaded.

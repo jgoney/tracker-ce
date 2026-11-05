@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <fcntl.h>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -415,4 +416,110 @@ TEST_CASE("test_fast_seek_idempotent_on_reopen")
     REQUIRE_FALSE(f.enableFastSeek(nullptr, c2, 64));
     f.closeFile(fh2);
     f.closeFile(fo);
+}
+
+TEST_CASE("test_fd_cache_bounded")
+{
+    TempRoot t;
+    FileSystemPosix f(t.path.string());
+    constexpr int kFiles = 100;
+    uint32_t clmt[kFiles][64];
+    for (int i = 0; i < kFiles; ++i)
+    {
+        std::vector<uint8_t> d(3000, (uint8_t)i);
+        writeAll(f, ("/f" + std::to_string(i) + ".bin").c_str(), d);
+    }
+    for (int i = 0; i < kFiles; ++i)
+    {
+        auto [ok, fh] = f.openFile(("/f" + std::to_string(i) + ".bin").c_str());
+        REQUIRE(ok);
+        clmt[i][0] = 64;
+        REQUIRE(f.enableFastSeek(fh, clmt[i], 64));
+        f.closeFile(fh);
+        REQUIRE(f.sectorMap().cachedFdCount() <= VirtualSectorMap::kMaxCachedFds);
+    }
+    uint8_t buf[512];
+    for (int i = 0; i < kFiles; ++i)
+    {
+        uint32_t lba = lbaForOffset(clmt[i], 2048, 64, 1024);
+        REQUIRE(f.readSectorsAsync(buf, lba, 1));
+        REQUIRE(buf[0] == (uint8_t)i);
+        REQUIRE(buf[511] == (uint8_t)i);
+        REQUIRE(f.sectorMap().cachedFdCount() <= VirtualSectorMap::kMaxCachedFds);
+    }
+    // real process fd usage: none beyond the cache (stdio + cache + slack)
+    int open = 0;
+    for (int fd = 3; fd < 512; ++fd)
+    {
+        if (fcntl(fd, F_GETFD) != -1)
+        {
+            ++open;
+        }
+    }
+    CHECK(open <= (int)VirtualSectorMap::kMaxCachedFds + 8);
+}
+
+TEST_CASE("test_old_range_survives_growth")
+{
+    TempRoot t;
+    FileSystemPosix f(t.path.string());
+    auto small = makePattern(50000);
+    writeAll(f, "/g.bin", small);
+    uint32_t c1[64] = { 64 }, c2[64] = { 64 };
+    {
+        auto [ok, fh] = f.openFile("/g.bin");
+        REQUIRE(ok);
+        REQUIRE(f.enableFastSeek(fh, c1, 64));
+        f.closeFile(fh);
+    }
+    auto big = makePattern(400000);
+    writeAll(f, "/g.bin", big); // same inode (O_TRUNC), grew
+    {
+        auto [ok, fh] = f.openFile("/g.bin");
+        REQUIRE(ok);
+        REQUIRE(f.enableFastSeek(fh, c2, 64));
+        f.closeFile(fh);
+    }
+    REQUIRE(c2[2] != c1[2]);
+    uint8_t buf[512];
+    REQUIRE(f.readSectorsAsync(buf, lbaForOffset(c1, 2048, 64, 20000), 1));
+    REQUIRE(std::memcmp(buf, big.data() + 20000 / 512 * 512, 512) == 0);
+    REQUIRE(f.readSectorsAsync(buf, lbaForOffset(c2, 2048, 64, 300000), 1));
+    REQUIRE(std::memcmp(buf, big.data() + 300000 / 512 * 512, 512) == 0);
+}
+
+TEST_CASE("test_replaced_file_read_fails_cleanly")
+{
+    TempRoot t;
+    FileSystemPosix f(t.path.string());
+    writeAll(f, "/r.bin", makePattern(10000));
+    uint32_t c[64] = { 64 };
+    {
+        auto [ok, fh] = f.openFile("/r.bin");
+        REQUIRE(ok);
+        REQUIRE(f.enableFastSeek(fh, c, 64));
+        f.closeFile(fh);
+    }
+    uint8_t buf[512];
+    uint32_t lba = lbaForOffset(c, 2048, 64, 512);
+    REQUIRE(f.readSectorsAsync(buf, lba, 1));
+    // evict it from the fd cache
+    for (int i = 0; i < 40; ++i)
+    {
+        std::string p = "/e" + std::to_string(i) + ".bin";
+        writeAll(f, p.c_str(), makePattern(600));
+        uint32_t ce[64] = { 64 };
+        auto [ok, fh] = f.openFile(p.c_str());
+        REQUIRE(ok);
+        REQUIRE(f.enableFastSeek(fh, ce, 64));
+        f.closeFile(fh);
+    }
+    // replace via rename with different content
+    writeAll(f, "/new.bin", std::vector<uint8_t>(10000, 0xEE));
+    fs::remove(t.path / "r.bin");
+    REQUIRE(f.rename("/new.bin", "/r.bin"));
+    REQUIRE_FALSE(f.readSectorsAsync(buf, lba, 1));
+    bool success = true;
+    REQUIRE(f.pollAsyncRead(&success));
+    REQUIRE_FALSE(success);
 }

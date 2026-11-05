@@ -419,7 +419,7 @@ bool FileSystemPosix::enableFastSeek(FileHandle fileHandle,
     {
         return false;
     }
-    const uint32_t base = sectorMap_.registerFile(h->fd, (uint64_t)st.st_size);
+    const uint32_t base = sectorMap_.registerFile(h->fd, (uint64_t)st.st_size, h->path);
     if (base == 0)
     {
         return false;
@@ -442,38 +442,8 @@ bool FileSystemPosix::enableFastSeek(FileHandle fileHandle,
 // Synchronous: the "async" read completes before returning. Bytes past EOF read as zero.
 bool FileSystemPosix::readSectorsAsync(uint8_t* buffer, uint32_t startSector, uint32_t sectorCount)
 {
-    int fd = -1;
-    uint64_t offset = 0;
-    lastAsyncSuccess_ = false;
-    if (buffer == nullptr || !sectorMap_.resolve(startSector, sectorCount, fd, offset))
-    {
-        return false;
-    }
-    const size_t total = (size_t)sectorCount * VirtualSectorMap::kSectorSize;
-    size_t done = 0;
-    while (done < total)
-    {
-        ssize_t n = ::pread(fd, buffer + done, total - done, (off_t)(offset + done));
-        if (n < 0)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            return false;
-        }
-        if (n == 0)
-        {
-            break;
-        }
-        done += (size_t)n;
-    }
-    if (done < total)
-    {
-        memset(buffer + done, 0, total - done);
-    }
-    lastAsyncSuccess_ = true;
-    return true;
+    lastAsyncSuccess_ = buffer != nullptr && sectorMap_.read(startSector, sectorCount, buffer);
+    return lastAsyncSuccess_;
 }
 
 bool FileSystemPosix::pollAsyncRead(bool* outSuccess)

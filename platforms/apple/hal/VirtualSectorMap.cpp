@@ -1,13 +1,17 @@
 #include "VirtualSectorMap.h"
 
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 VirtualSectorMap::~VirtualSectorMap()
 {
-    for (auto& e : entries_)
+    for (auto& c : cache_)
     {
-        ::close(e.fd);
+        ::close(c.fd);
     }
 }
 
@@ -17,74 +21,195 @@ uint32_t VirtualSectorMap::clustersForSize(uint64_t size)
     return static_cast<uint32_t>((size + clusterBytes - 1) / clusterBytes);
 }
 
-uint32_t VirtualSectorMap::registerFile(int fd, uint64_t size)
+size_t VirtualSectorMap::cachedFdCount()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_.size();
+}
+
+void VirtualSectorMap::cacheFd(uint64_t dev, uint64_t ino, int fd)
+{
+    for (auto& c : cache_)
+    {
+        if (c.dev == dev && c.ino == ino)
+        {
+            ::close(c.fd);
+            c.fd = fd;
+            c.lastUse = ++tick_;
+            return;
+        }
+    }
+    if (cache_.size() >= kMaxCachedFds)
+    {
+        size_t lru = 0;
+        for (size_t i = 1; i < cache_.size(); ++i)
+        {
+            if (cache_[i].lastUse < cache_[lru].lastUse)
+            {
+                lru = i;
+            }
+        }
+        ::close(cache_[lru].fd); // safe: every pread happens under mutex_
+        cache_.erase(cache_.begin() + lru);
+    }
+    cache_.push_back({ dev, ino, fd, ++tick_ });
+}
+
+uint32_t VirtualSectorMap::registerFile(int fd, uint64_t size, const std::string& pathIn)
 {
     struct stat st;
     if (fd < 0 || ::fstat(fd, &st) != 0)
     {
         return 0;
     }
-    const uint32_t needed = clustersForSize(size) + 1; // +1 guard cluster, like the spec'd layout
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& e : entries_)
+    std::string path = pathIn;
+    if (path.empty())
     {
-        if (e.dev == uint64_t(st.st_dev) && e.ino == uint64_t(st.st_ino))
+        char buf[MAXPATHLEN];
+        if (::fcntl(fd, F_GETPATH, buf) == 0)
         {
-            // Same file reopened: refresh our descriptor (the old file object may be gone).
-            int newFd = ::dup(fd);
-            if (newFd >= 0)
-            {
-                ::close(e.fd);
-                e.fd = newFd;
-            }
-            if (needed <= e.clusterSpan)
-            {
-                return e.baseCluster;
-            }
-            // Grew past its range: needs a new range.
-            e.baseCluster = nextCluster_;
-            e.clusterSpan = needed;
-            nextCluster_ += needed;
-            return e.baseCluster;
+            path = buf;
         }
     }
-    int own = ::dup(fd);
-    if (own < 0)
+    const uint32_t needed = clustersForSize(size) + 1; // +1 guard cluster
+    const uint64_t dev = uint64_t(st.st_dev), ino = uint64_t(st.st_ino);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    int own = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (own >= 0)
+    {
+        cacheFd(dev, ino, own);
+    }
+    Range* newest = nullptr;
+    for (auto& r : ranges_)
+    {
+        if (r.dev == dev && r.ino == ino)
+        {
+            if (!path.empty())
+            {
+                r.path = path;
+            }
+            if (r.clusterSpan >= needed)
+            {
+                return r.baseCluster; // idempotent
+            }
+            newest = &r;
+        }
+    }
+    (void)newest; // older ranges stay valid as aliases of this file
+    if (own < 0 && path.empty())
     {
         return 0;
     }
-    Entry e{ uint64_t(st.st_dev), uint64_t(st.st_ino), own, nextCluster_, needed };
+    ranges_.push_back({ dev, ino, path, nextCluster_, needed });
     nextCluster_ += needed;
-    entries_.push_back(e);
-    return e.baseCluster;
+    return ranges_.back().baseCluster;
+}
+
+const VirtualSectorMap::Range* VirtualSectorMap::findRange(uint32_t lba,
+                                                           uint32_t count,
+                                                           uint64_t& fileByteOffset) const
+{
+    if (lba < kDatabaseSector || count == 0)
+    {
+        return nullptr;
+    }
+    const uint64_t rel = lba - kDatabaseSector;
+    const uint64_t cluster = kFirstCluster + rel / kSectorsPerCluster;
+    for (const auto& r : ranges_)
+    {
+        if (cluster < r.baseCluster || cluster >= uint64_t(r.baseCluster) + r.clusterSpan)
+        {
+            continue;
+        }
+        const uint64_t fileSector = rel - uint64_t(r.baseCluster - kFirstCluster) * kSectorsPerCluster;
+        if (fileSector + count > uint64_t(r.clusterSpan) * kSectorsPerCluster)
+        {
+            return nullptr;
+        }
+        fileByteOffset = fileSector * kSectorSize;
+        return &r;
+    }
+    return nullptr;
+}
+
+int VirtualSectorMap::fdFor(const Range& r)
+{
+    for (auto& c : cache_)
+    {
+        if (c.dev == r.dev && c.ino == r.ino)
+        {
+            c.lastUse = ++tick_;
+            return c.fd;
+        }
+    }
+    if (r.path.empty())
+    {
+        return -1;
+    }
+    int fd = ::open(r.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        return -1;
+    }
+    struct stat st;
+    if (::fstat(fd, &st) != 0 || uint64_t(st.st_dev) != r.dev || uint64_t(st.st_ino) != r.ino)
+    {
+        ::close(fd); // replaced file: refuse
+        return -1;
+    }
+    cacheFd(r.dev, r.ino, fd);
+    return fd;
 }
 
 bool VirtualSectorMap::resolve(uint32_t lba, uint32_t count, int& fd, uint64_t& offset)
 {
-    if (lba < kDatabaseSector || count == 0)
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Range* r = findRange(lba, count, offset);
+    if (r == nullptr)
     {
         return false;
     }
-    const uint64_t rel = lba - kDatabaseSector;
-    const uint64_t cluster = kFirstCluster + rel / kSectorsPerCluster;
+    fd = fdFor(*r);
+    return fd >= 0;
+}
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& e : entries_)
+bool VirtualSectorMap::read(uint32_t lba, uint32_t count, uint8_t* buf)
+{
+    std::lock_guard<std::mutex> lock(mutex_); // held across pread: eviction can't close the fd
+    uint64_t offset = 0;
+    const Range* r = findRange(lba, count, offset);
+    if (r == nullptr)
     {
-        if (cluster < e.baseCluster || cluster >= uint64_t(e.baseCluster) + e.clusterSpan)
+        return false;
+    }
+    const int fd = fdFor(*r);
+    if (fd < 0)
+    {
+        return false;
+    }
+    const size_t total = size_t(count) * kSectorSize;
+    size_t done = 0;
+    while (done < total)
+    {
+        ssize_t n = ::pread(fd, buf + done, total - done, off_t(offset + done));
+        if (n < 0)
         {
-            continue;
-        }
-        const uint64_t fileSector = rel - uint64_t(e.baseCluster - kFirstCluster) * kSectorsPerCluster;
-        const uint64_t spanSectors = uint64_t(e.clusterSpan) * kSectorsPerCluster;
-        if (fileSector + count > spanSectors)
-        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
             return false;
         }
-        fd = e.fd;
-        offset = fileSector * kSectorSize;
-        return true;
+        if (n == 0)
+        {
+            break;
+        }
+        done += size_t(n);
     }
-    return false;
+    if (done < total)
+    {
+        memset(buf + done, 0, total - done);
+    }
+    return true;
 }
