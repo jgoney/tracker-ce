@@ -26,6 +26,7 @@ void startDisplayNoop(Platform*) {}
     std::unique_ptr<CoreAudioOutput> _out;
     std::unique_ptr<MetalRenderer> _renderer;
     id<MTLDevice> _device;
+    dispatch_queue_t _enumQueue; // device enumeration (may hang)
     dispatch_queue_t _control; // serial: start / stop / device selection
     std::atomic<bool> _running; // platform alive and input accepted
     std::atomic<bool> _stopped;
@@ -46,6 +47,7 @@ void startDisplayNoop(Platform*) {}
     if (!(self = [super init]))
         return nil;
     _control = dispatch_queue_create("local.trackerce.control", DISPATCH_QUEUE_SERIAL);
+    _enumQueue = dispatch_queue_create("local.trackerce.enum", DISPATCH_QUEUE_SERIAL);
     _audioNames = @[ @"System Default" ];
     _midiNames = @[];
     _status = @"Starting…";
@@ -156,21 +158,35 @@ void startDisplayNoop(Platform*) {}
             l = self->_prefL;
             r = self->_prefR;
         }
-        AudioDeviceID id = 0;
-        if (!dev.empty())
-        {
-            for (auto& d : CoreAudioOutput::listOutputDevices())
-                if (d.name == dev && (uint32_t)std::max(l, r) < d.outChannels)
-                    id = d.id;
-        }
-        [self openAndStart:id left:id ? l : 0 right:id ? r : 1];
-        if (!midi.empty())
-        {
-            auto dests = MidiCoreMidi::listDestinations();
-            for (size_t i = 0; i < dests.size(); i++)
-                if (dests[i] == midi)
-                    self->_platform->midi().selectDestination((int)i);
-        }
+        // Enumeration can hang on a bad driver: do it on its own queue so -stop (on _control)
+        // never waits behind it, then hop back to open the device.
+        dispatch_async(self->_enumQueue, ^{
+            if (getenv("TRACKERCE_TEST_HANG_ENUM")) // test hook: hung listOutputDevices
+                for (;;)
+                    sleep(1000);
+            AudioDeviceID id = 0;
+            if (!dev.empty())
+            {
+                for (auto& d : CoreAudioOutput::listOutputDevices())
+                    if (d.name == dev && (uint32_t)std::max(l, r) < d.outChannels)
+                        id = d.id;
+            }
+            int midiIdx = -1;
+            if (!midi.empty())
+            {
+                auto dests = MidiCoreMidi::listDestinations();
+                for (size_t i = 0; i < dests.size(); i++)
+                    if (dests[i] == midi)
+                        midiIdx = (int)i;
+            }
+            dispatch_async(self->_control, ^{
+                if (self->_stopped)
+                    return;
+                [self openAndStart:id left:id ? l : 0 right:id ? r : 1];
+                if (midiIdx >= 0)
+                    self->_platform->midi().selectDestination(midiIdx);
+            });
+        });
     });
 }
 
@@ -181,10 +197,14 @@ void startDisplayNoop(Platform*) {}
             return;
         self->_stopped = true;
         self->_running = false;
-        if (self->_renderer)
-            MetalRenderer::detachSnapshotHook(self->_platform->display());
+        if (getenv("TRACKERCE_TEST_HANG_STOP")) // test hook: a wedged teardown
+            for (;;)
+                sleep(1000);
         self->_out->stop();
         self->_rt->stop();
+        // After the tracker thread has stopped: the hook is a plain std::function it invokes.
+        if (self->_renderer)
+            MetalRenderer::detachSnapshotHook(self->_platform->display());
         self->_platform->midi().detachOutput(*self->_out);
         // Everything stays allocated until dealloc/process exit: the Tracker singleton still
         // points at the platform. Members destroy in reverse order (output, runtime, platform
@@ -309,6 +329,11 @@ void startDisplayNoop(Platform*) {}
         return NO;
     auto frame = _platform->display().latestFrame();
     return frame && _renderer->renderToPNG(*frame, path.fileSystemRepresentation);
+}
+
+- (BOOL)isPadDown:(int)i
+{
+    return _running && i >= 0 && i < 48 && _platform->input().pads().isButtonPressed(i);
 }
 
 - (void)testClockAndPlay

@@ -60,6 +60,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Renders the latest frame offscreen to a PNG (800x480 x scale). False if there is no frame.
 - (BOOL)saveScreenshot:(NSString*)path;
 
+/// True while InputApple (the core's view) has the pad down. Test hook.
+- (BOOL)isPadDown:(int)i;
+
 /// Test hook (--test-clock-play): turn on USB clock out and press Play.
 - (void)testClockAndPlay;
 

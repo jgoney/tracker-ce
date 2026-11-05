@@ -10,7 +10,14 @@ final class TrackerMTKView: MTKView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.makeFirstResponder(self)
+        // SwiftUI may reassign the first responder after the window appears: claim it again.
+        DispatchQueue.main.async { [weak self] in self?.window?.makeFirstResponder(self) }
         NotificationCenter.default.removeObserver(self)
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                               object: window, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.window?.makeFirstResponder(self)
+        }
         NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification,
                                                object: window, queue: .main) { [weak self] _ in
             self?.router?.releaseAll()

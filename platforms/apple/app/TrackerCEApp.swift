@@ -11,7 +11,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
-        AppModel.shared.shutdown { NSApp.reply(toApplicationShouldTerminate: true) }
+        // Replies exactly once: normally when teardown finishes, else after 5 s (a hung audio
+        // driver must not keep the process alive; the wedged teardown is deliberately leaked).
+        let lock = NSLock()
+        var replied = false
+        let reply = {
+            lock.lock(); defer { lock.unlock() }
+            if replied { return }
+            replied = true
+            RunLoop.main.perform(inModes: [.common, .modalPanel]) {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        AppModel.shared.shutdown(completion: reply)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+            if !replied { print("shutdown watchdog: teardown still running after 5 s, quitting anyway") }
+            reply()
+        }
         return .terminateLater
     }
 
@@ -29,6 +45,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let ok = model.bridge.saveScreenshot(path)
                 print("screenshot \(ok ? "written" : "FAILED"): \(path)")
                 model.showDebug = a.contains("--debug")
+            }
+        }
+        if a.contains("--test-key") {
+            // Synthetic keyDown/keyUp for the '1' key (pad 0) through the window: proves the
+            // MTKView is first responder and the press reaches InputApple.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                guard let w = NSApp.windows.first(where: { $0.isVisible }) else { print("test-key: no window"); return }
+                func ev(_ t: NSEvent.EventType) -> NSEvent? {
+                    NSEvent.keyEvent(with: t, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                     windowNumber: w.windowNumber, context: nil, characters: "1",
+                                     charactersIgnoringModifiers: "1", isARepeat: false, keyCode: 18)
+                }
+                NSApp.sendEvent(ev(.keyDown)!)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    let down = model.bridge.isPadDown(0)
+                    NSApp.sendEvent(ev(.keyUp)!)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        let up = !model.bridge.isPadDown(0)
+                        print("test-key: pad0 down=\(down) released=\(up) firstResponder=\(String(describing: type(of: w.firstResponder as Any)))")
+                    }
+                }
             }
         }
         if a.contains("--debug") { model.showDebug = true }
