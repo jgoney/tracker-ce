@@ -16,6 +16,11 @@ Changes to `core/` made for the Apple host build. *neutral* means the hardware c
 - `core: portable C implementations of Cortex-M DSP intrinsics in dspinst.h for Apple` - *neutral* (hardware path untouched, new block under `PLATFORM_APPLE`).
 - `core: keep strInstrument layout on 64-bit hosts via 4-byte SampleAddress handle` (`mtStructs.h`) - *neutral* (hardware keeps `int16_t*`).
 - `core: return a value on the unreachable tail of AudioPlayMemory update paths` (`play_memory_loop_pingpong.cpp`, `play_memory_single_shot.cpp`, `play_memory_wavetable.cpp`) - *neutral*: the fall-through is only reachable if `playing` is not 0 or 1, which never happens; it now releases the block and returns `nullptr` like the `!playing` branch. Fixes `-Wreturn-type` UB on the host.
+- `core: zero-initialise project file buffer before save` (`fileManagerProject.cpp`) - **hardware-visible (benign)**: the stack `strProjectFile` was written to disk with the unused tails of `projectName`/`projectPath` holding stack garbage; now zero. Only bytes after the NUL terminators change, and the files stay readable by existing firmware. Makes project files deterministic (byte-identical re-saves).
+
+## Needs hardware test
+
+- Zero-initialised project buffer: save a project on the Tracker, reload it, and confirm it loads with its name intact.
 
 ## Known limitations
 

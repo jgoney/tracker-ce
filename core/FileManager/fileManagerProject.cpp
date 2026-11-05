@@ -25,7 +25,7 @@ static strRecentFile externalRamRecentProjectsList;
 void cFileManager::saveProjectFileToWorkspace()
 {
     // sprawdza czy zaktualizowac patternBitmask
-    strProjectFile fileManagerProjectBuffer;
+    strProjectFile fileManagerProjectBuffer{};
 
     if (writeProjectFileToFileStruct(&mtProject, &fileManagerProjectBuffer))
     {
