@@ -56,11 +56,11 @@ static inline int32_t multiply_32x32_rshift32_rounded(int32_t a, int32_t b)
 }
 static inline int32_t multiply_accumulate_32x32_rshift32_rounded(int32_t sum, int32_t a, int32_t b)
 {
-    return (int32_t)((((int64_t)sum << 32) + (int64_t)a * b + 0x80000000LL) >> 32);
+    return (int32_t)((int64_t)(((uint64_t)(int64_t)sum << 32) + (uint64_t)((int64_t)a * b) + 0x80000000ULL) >> 32);
 }
 static inline int32_t multiply_subtract_32x32_rshift32_rounded(int32_t sum, int32_t a, int32_t b)
 {
-    return (int32_t)((((int64_t)sum << 32) - (int64_t)a * b + 0x80000000LL) >> 32);
+    return (int32_t)((int64_t)(((uint64_t)(int64_t)sum << 32) - (uint64_t)((int64_t)a * b) + 0x80000000ULL) >> 32);
 }
 static inline uint32_t pack_16t_16t(int32_t a, int32_t b) { return ((uint32_t)a & 0xFFFF0000u) | ((uint32_t)b >> 16); }
 static inline uint32_t pack_16t_16b(int32_t a, int32_t b) { return ((uint32_t)a & 0xFFFF0000u) | ((uint32_t)b & 0xFFFFu); }
@@ -100,19 +100,22 @@ static inline int32_t signed_multiply_accumulate_32x16t(int32_t sum, int32_t a, 
 static inline uint32_t logical_and(uint32_t a, uint32_t b) { return a & b; }
 static inline int32_t multiply_16tx16t_add_16bx16b(uint32_t a, uint32_t b)
 {
-    return dspinst_lo16(a) * dspinst_lo16(b) + dspinst_hi16(a) * dspinst_hi16(b);
+    return (int32_t)((uint32_t)(dspinst_lo16(a) * dspinst_lo16(b)) + (uint32_t)(dspinst_hi16(a) * dspinst_hi16(b)));
 }
 static inline int32_t multiply_16tx16b_add_16bx16t(uint32_t a, uint32_t b)
 {
-    return dspinst_lo16(a) * dspinst_hi16(b) + dspinst_hi16(a) * dspinst_lo16(b);
+    return (int32_t)((uint32_t)(dspinst_lo16(a) * dspinst_hi16(b)) + (uint32_t)(dspinst_hi16(a) * dspinst_lo16(b)));
 }
 static inline int64_t multiply_accumulate_16tx16t_add_16bx16b(int64_t sum, uint32_t a, uint32_t b)
 {
-    return sum + multiply_16tx16t_add_16bx16b(a, b);
+    // each product is accumulated into the 64-bit sum separately (SMLALD)
+    return (int64_t)((uint64_t)sum + (uint64_t)(int64_t)(dspinst_lo16(a) * dspinst_lo16(b)) +
+                     (uint64_t)(int64_t)(dspinst_hi16(a) * dspinst_hi16(b)));
 }
 static inline int64_t multiply_accumulate_16tx16b_add_16bx16t(int64_t sum, uint32_t a, uint32_t b)
 {
-    return sum + multiply_16tx16b_add_16bx16t(a, b);
+    return (int64_t)((uint64_t)sum + (uint64_t)(int64_t)(dspinst_lo16(a) * dspinst_hi16(b)) +
+                     (uint64_t)(int64_t)(dspinst_hi16(a) * dspinst_lo16(b)));
 }
 static inline int32_t multiply_16bx16b(uint32_t a, uint32_t b) { return dspinst_lo16(a) * dspinst_lo16(b); }
 static inline int32_t multiply_16bx16t(uint32_t a, uint32_t b) { return dspinst_lo16(a) * dspinst_hi16(b); }
