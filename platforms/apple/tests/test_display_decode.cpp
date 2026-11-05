@@ -109,14 +109,14 @@ TEST_CASE("test_save_restore_context")
     REQUIRE(in.rgba == 0xFF0000FF);
     REQUIRE(in.lineRadiusPx == 1.0f);
     REQUIRE(in.blend == BlendMode{ SRC_ALPHA, ZERO });
-    REQUIRE(in.scissor == Rect{ 1, 2, 3, 4 });
+    REQUIRE(in.scissor == PixelRect{ 1, 2, 3, 4 });
     REQUIRE(in.verts[1] == Vec2{ 2, 2 });
 
     const Prim& out = f->prims[1];
     REQUIRE(out.rgba == ft812::packRgba(0, 255, 0, 128));
     REQUIRE(out.lineRadiusPx == 3.0f);
     REQUIRE(out.blend == BlendMode{ SRC_ALPHA, ONE });
-    REQUIRE(out.scissor == Rect{ 0, 0, 2048, 2048 });
+    REQUIRE(out.scissor == PixelRect{ 0, 0, 2048, 2048 });
     REQUIRE(out.verts[1] == Vec2{ 2, 2 }); // VERTEX_FORMAT restored to 4
 }
 
@@ -129,7 +129,7 @@ TEST_CASE("test_scissor")
     REQUIRE(f);
     REQUIRE(f->prims.size() == 1);
     REQUIRE(f->prims[0].kind == Prim::Rects);
-    REQUIRE(f->prims[0].scissor == Rect{ 10, 20, 30, 40 });
+    REQUIRE(f->prims[0].scissor == PixelRect{ 10, 20, 30, 40 });
 
     REQUIRE(f);
     auto rgb = CpuRaster::render(*f, c.m);
@@ -704,7 +704,7 @@ TEST_CASE("gradient expands to words that decode into a gradient prim")
     REQUIRE(g.verts.size() == 2);
     REQUIRE(g.verts[0] == Vec2{ 0, 100 });
     REQUIRE(g.verts[1] == Vec2{ 0, 110 });
-    REQUIRE(g.scissor == Rect{ 10, 100, 50, 10 });
+    REQUIRE(g.scissor == PixelRect{ 10, 100, 50, 10 });
 
     auto rgb = CpuRaster::render(*f, c.m);
     REQUIRE(px(rgb, 9, 100) == 0x000000);   // outside the scissor
@@ -753,9 +753,9 @@ TEST_CASE("snapshot2 calls the hook, or fills black headless")
     }
     REQUIRE(c.m.ramG()[60000 + 48] == 0x55);
 
-    Rect seen;
+    PixelRect seen;
     uint32_t seenAddr = 0, seenFmt = 0;
-    c.m.snapshotHook = [&](Rect r, uint32_t addr, uint32_t fmt) {
+    c.m.snapshotHook = [&](PixelRect r, uint32_t addr, uint32_t fmt) {
         seen = r;
         seenAddr = addr;
         seenFmt = fmt;
@@ -764,7 +764,7 @@ TEST_CASE("snapshot2 calls the hook, or fills black headless")
     c.m.beginCoProList();
     c.words({ CMD_SNAPSHOT2, 0x20, 70000, (240u << 16) | 0u, (240u << 16) | 1600u });
     c.m.endCoProList();
-    REQUIRE(seen == Rect{ 0, 240, 800, 240 });
+    REQUIRE(seen == PixelRect{ 0, 240, 800, 240 });
     REQUIRE(seenAddr == 70000);
     REQUIRE(seenFmt == 0x20);
 }

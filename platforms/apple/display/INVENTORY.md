@@ -71,7 +71,7 @@ Stencil, alpha test, colour mask and tag do not reach `Frame`.
 | `CMD_MEMCPY` | 6 | widget cache | implemented (RAM_G and RAM_DL address ranges) |
 | `CMD_TRANSLATE` / `CMD_ROTATE` / `CMD_LOADIDENTITY` / `CMD_SETMATRIX` | 4 / 2 / 2 / 2 | rotated text `label.cpp:209-213`, `songPlayer.cpp:643-647` | coprocessor matrix; `CMD_SETMATRIX` writes `BITMAP_TRANSFORM_A`-`F`, see "Matrices" (`CMD_SCALE` too, unused) |
 | `CMD_LOADIMAGE` + `CMD_GETPROPS` | 1 + 1 | image viewer `display.cpp:419,456-460` | JPEG/PNG parsed segment by segment, decoded with ImageIO to RGB565 (L8 with `OPT_MONO`) in RAM_G; `getImgProps` returns (end address, width, height); without `OPT_NODL` also the `CMD_SETBITMAP` words |
-| `CMD_SNAPSHOT2` | 2 | screenshots `snapshots.cpp:85,100` (fmt 0x20 ARGB8) | `Ft812Model::snapshotHook(Rect, addr, fmt)`; unset or false: the area is filled opaque black |
+| `CMD_SNAPSHOT2` | 2 | screenshots `snapshots.cpp:85,100` (fmt 0x20 ARGB8) | `Ft812Model::snapshotHook(PixelRect, addr, fmt)`; unset or false: the area is filled opaque black |
 | `CMD_MEMZERO` | 1 | `snapshots.cpp:117` | implemented |
 | `CMD_SETFONT2` | 2 | font upload `display.cpp:286,1369` | registers the font, writes the handle's bitmap words, see "Text" |
 | `CMD_SETBASE` | 2 | `songPlayer.cpp:240,244` (hex numbers) | stored (persists across lists) |
@@ -204,7 +204,7 @@ glyph tops face left, text reads bottom to top.
 
 ## Snapshots and images (Task 5b)
 
-- `CMD_SNAPSHOT2(fmt, ptr, x, y, w, h)` calls `snapshotHook(Rect{x, y, w', h}, ptr, fmt)` with
+- `CMD_SNAPSHOT2(fmt, ptr, x, y, w, h)` calls `snapshotHook(PixelRect{x, y, w', h}, ptr, fmt)` with
   `w' = w / 2` for ARGB8 (0x20: the core passes 1600 for the 800 px screen and reads 3200-byte
   rows), else `w`. Without a hook (or if it returns false) the area is filled with opaque black
   in that format (ARGB8 bytes 00 00 00 FF). Task 9 provides the real hook.

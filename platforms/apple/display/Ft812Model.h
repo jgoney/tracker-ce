@@ -56,7 +56,7 @@ class Ft812Model : public DisplayDriver
     // --- host side ---
     // CMD_SNAPSHOT2: renders `rect` (screen pixels) into RAM_G at `addr` in format `fmt` and
     // returns true. Unset or returning false: the model fills the area black.
-    std::function<bool(Rect rect, uint32_t addr, uint32_t fmt)> snapshotHook;
+    std::function<bool(PixelRect rect, uint32_t addr, uint32_t fmt)> snapshotHook;
 
     bool powered() const { return powered_; }
     int brightness() const { return brightness_; }

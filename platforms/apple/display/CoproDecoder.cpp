@@ -402,7 +402,7 @@ void CoproDecoder::setMatrix()
 void CoproDecoder::snapshot(uint32_t fmt, uint32_t ptr, int32_t x, int32_t y, int32_t w, int32_t h)
 {
     // ARGB8 snapshots take twice the pixel width (snapshots.cpp: 1600 for the 800 px screen).
-    const Rect r{ x, y, fmt == kSnapshotArgb8 ? w / 2 : w, h };
+    const PixelRect r{ x, y, fmt == kSnapshotArgb8 ? w / 2 : w, h };
     if (r.w <= 0 || r.h <= 0)
         return;
     const uint32_t bpp = snapshotBpp(fmt);

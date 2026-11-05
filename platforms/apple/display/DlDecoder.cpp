@@ -72,7 +72,7 @@ struct Context
     uint8_t clearR = 0, clearG = 0, clearB = 0, clearA = 0;
     uint32_t lineWidth = 16; // 1/16 px
     uint32_t pointSize = 16; // 1/16 px
-    Rect scissor{ 0, 0, 2048, 2048 };
+    PixelRect scissor{ 0, 0, 2048, 2048 };
     BlendMode blend{ SRC_ALPHA, ONE_MINUS_SRC_ALPHA };
     uint32_t handle = 0, cell = 0;
     int32_t xf[6] = { 256, 0, 0, 0, 256, 0 }; // A,B,D,E: 8.8; C,F: 15.8
@@ -217,7 +217,7 @@ void Decoder::clear(uint32_t w)
     if (!(w & 4)) // colour buffer not cleared (stencil/tag only)
         return;
     const uint32_t color = ft812::packRgba(c_.clearR, c_.clearG, c_.clearB, c_.clearA);
-    const Rect& s = c_.scissor;
+    const PixelRect& s = c_.scissor;
     const bool fullScreen = s.x <= 0 && s.y <= 0 && s.x + s.w >= ft812::kScreenWidth &&
                             s.y + s.h >= ft812::kScreenHeight;
     if (out_.prims.empty() && fullScreen)

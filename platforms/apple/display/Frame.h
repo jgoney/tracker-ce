@@ -24,10 +24,10 @@ struct Vec2
 };
 
 // Pixel rectangle (EVE scissor: x, y, width, height in whole pixels).
-struct Rect
+struct PixelRect
 {
     int x = 0, y = 0, w = 0, h = 0;
-    bool operator==(const Rect& o) const { return x == o.x && y == o.y && w == o.w && h == o.h; }
+    bool operator==(const PixelRect& o) const { return x == o.x && y == o.y && w == o.w && h == o.h; }
 };
 
 // EVE BLEND_FUNC factors (FT81x.h: ZERO 0, ONE 1, SRC_ALPHA 2, DST_ALPHA 3,
@@ -62,7 +62,7 @@ struct Prim
     uint32_t rgba2 = 0;         // Gradient only: colour at verts[1]
     float lineRadiusPx = 1;     // LINE_WIDTH / 16: line radius, rect corner radius
     float pointRadiusPx = 1;    // POINT_SIZE / 16: point radius
-    Rect scissor{ 0, 0, 2048, 2048 };
+    PixelRect scissor{ 0, 0, 2048, 2048 };
     BlendMode blend;
     std::vector<Vec2> verts; // px
 
