@@ -1,6 +1,6 @@
 # Tracker CE on Apple Platforms — Mac MVP Design
 
-Status: reviewed, awaiting user approval · Date: 2026-11-05 · Branch: `apple-port-design` (local only, not pushed)
+Status: approved 2026-11-05; revised after independent review (same scope) · Date: 2026-11-05 · Branch: `apple-port-design` (local only, not pushed)
 
 ## 1. Intent and the why
 
@@ -41,7 +41,7 @@ The user opens the app and loads a few WAV drum samples from a folder. They writ
 - Open replacement synth engines (e.g. Mutable Instruments, MIT) and AUv3 effect hosting.
 
 **Out of scope entirely**
-- The proprietary synth libraries (`synth/lib/libPolySynth.a`, `libPolyDSP.a`). They are Cortex-M7 binaries and their licence forbids reuse here. Never link them. (How this interacts with `FEATURE_SYNTH` and project compatibility is covered in section 5.)
+- The proprietary synth libraries (`synth/lib/libPolySynth.a`, `libPolyDSP.a`). They are Cortex-M7 object files, so they can't run on a Mac or iPad. (Their licence would allow personal non-commercial use, but that doesn't help here.) Never link them. (How this interacts with `FEATURE_SYNTH` and project compatibility is covered in section 5.)
 - `.ptfx` Sample Editor plugins. They are ARM binaries loaded by `core/effector/ptfx_loader.cpp`, which writes MPU/cache registers. Stub them out.
 - The Sample Recorder (recording from audio input). It is out of the MVP. Stub the screen so it can't crash. *(User's call.)* It is the **first stage after the MVP**, because it lays the groundwork for the live buffer.
 - Hardware-only subsystems: radio, battery, USB audio, firmware update, factory test (`core/source/mtTest.cpp`), SGTL5000 codec control. Stub them out.
@@ -49,7 +49,7 @@ The user opens the app and loads a few WAV drum samples from a folder. They writ
 
 **Anti-goals** (failures even if it "works")
 - Rewriting or forking the 41 screen files in `core/interface/` or the widget library in `core/libs/NewDisplay/` to make rendering work. The point is that the existing UI runs as is.
-- Breaking the existing MK66/IMX hardware builds. Every core change must be behind `PLATFORM_APPLE` (or equivalent), or be harmless on hardware.
+- Breaking the existing MK66/IMX hardware builds, or changing hardware behaviour without saying so. The user has no Tracker to test on.
 - Anything that conflicts with the licence: no proprietary libs, no selling it, and no Polyend trademarks in the app name or icon. The licence explicitly allows a free, personal, non-commercial iOS/desktop port.
 - Weeks of plumbing with nothing on screen. Get pixels up early.
 
@@ -75,7 +75,8 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
 - Screens (`core/interface/`, 41 files) call only the widget API on `display` (`setControlText`, `refreshControl`, …). Only `mtTest.cpp` touches the chip directly.
 - Widgets (`core/libs/NewDisplay/`, about 35 files) make about 1,600 calls to about 60 `API_*` functions. These are declared in `core/libs/FT812/FT812.h` and implemented in `FT812.cpp`. Each one encodes a 32-bit FT812 (Bridgetek EVE2) display-list word and writes it through `DisplayDriver::WriteData32`.
 - The vocabulary is small. The most-used calls are `VERTEX2F`, `COLOR`, `BEGIN`/`END` (points, lines, rects, line strips), `LINE_WIDTH`, `SAVE`/`RESTORE_CONTEXT`, `CMD_TEXT`, `BLEND_FUNC`, bitmap setup (`BITMAP_HANDLE`/`SOURCE`/`LAYOUT`/`SIZE`, `CELL`, `VERTEX2II`), `SCISSOR`, `CMD_GRADIENT`, `CMD_NUMBER` and `CMD_APPEND`/`MEMCPY`/`SETBITMAP`.
-- About 13 uses of `CMD_INFLATE` / `CMD_SNAPSHOT` / `CMD_LOADIMAGE` exist.
+- There is no `CMD_INFLATE`: fonts and images are RLE-decoded on the CPU. `CMD_SNAPSHOT2` is used only for screenshots, and `CMD_LOADIMAGE` only by the image viewer.
+- Bitmap formats in use: L4, L2, L8, RGB565 and PALETTED4444. Rotated and scaled bitmaps need transforms. *(Corrected after independent review.)*
 - Fonts are L4 bitmaps of Liberation Sans (`core/libs/fonts/`). Images and fonts are uploaded to the chip's RAM_G through `writeDataRAMG` / `writeFontRAMG`. `stream.cpp` uses DMA streaming into RAM_G.
 
 **Input.** Platform `SwitchGroup` callbacks reach `onPadPush/Release/Hold`, `onButtonPush/Release/Hold` and `onPotChange` in `core/source/mtActions.cpp`. Pads have no velocity. Callbacks fire from the main-loop update, not from an interrupt.
@@ -106,6 +107,12 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
   - The split must not change the MK66 or IMX hardware builds. *(User agreed to my recommendation.)*
 - **Sample Recorder out of the MVP,** first thing after. *(User agreed to my recommendation.)*
 - **MIDI timing gets a later tightening pass.** The MVP implements latency-compensated timestamping and a manual offset (section 6). Precise targets and measurement come later. *(User's call.)*
+- **Changes to the core are welcome when they're the right fix** (user decision, 2026-11-05). In order of preference:
+  1. A fix that is correct on every platform. Example: build paths with `FileSystem::kPathSeparator` instead of the backslashes in `core/synth/Synth.cpp:462-464`.
+  2. A compile-time platform trait (`if constexpr`) when behaviour must differ.
+  3. `#ifdef PLATFORM_APPLE` only where code can't compile on one side.
+
+  Core changes go in small, separate commits marked *neutral* or *hardware-visible*, so they could become upstream PRs. Hardware-visible ones need community testing first (`CONTRIBUTING.md` §4).
 - **Audio interface:** Core Audio. **MIDI:** CoreMIDI. **Storage:** a folder on disk. *(My call, stated to the user.)*
 
 ## 6. Calls I made (the user should check these)
@@ -121,9 +128,11 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
 
   Inventory of what the decoder must cover:
   - the display-list opcodes that `FT812.cpp` encodes
-  - the coprocessor commands in use (`CMD_TEXT`, `CMD_NUMBER`, `CMD_GRADIENT`, `CMD_APPEND`, `CMD_MEMCPY`, `CMD_SETBITMAP`, `CMD_INFLATE` (zlib), `CMD_SNAPSHOT2`, `CMD_DLSTART`/`CMD_SWAP`, …)
+  - the coprocessor commands in use (`CMD_TEXT`, `CMD_NUMBER`, `CMD_GRADIENT`, `CMD_APPEND`, `CMD_MEMCPY`, `CMD_SETBITMAP`, `CMD_SETBASE`, `CMD_LOADIMAGE`, `CMD_SNAPSHOT2`, `CMD_DLSTART`/`CMD_SWAP`, …)
   - the EVE bitmap formats actually used (at least L4 for fonts)
   - the DMA stream path in `stream.cpp`
+
+  **Coprocessor commands write display-list words**, exactly as on EVE, and only the swap turns the display list into shapes. This applies to text, numbers and gradients too. Widgets cache their *expanded* display list (`display.cpp:557`, read via `getDisplayListOffset()`) and replay it, so drawing shapes early would drop text from every cached widget. *(Found in independent review.)*
 
   The coprocessor always reports itself as empty, and swaps happen synchronously.
 - **MIDI timing.** Every outgoing MIDI message, notes and CC as well as clock, is timestamped with CoreMIDI timestamps to the moment its audio block will actually be heard. That moment is block time plus the device's reported output latency, plus the core's existing sub-block offset where one exists. That keeps MIDI-driven voices aligned with the drums. Add a user-adjustable MIDI offset in ms (±) to absorb the extra delay of Semaphore and the voice itself. For the MVP, MIDI-driven voices should sound in time with the drums by ear, and clock should drive a clocked module steadily. Tightening with real measurement is deferred to a later pass (section 5).
@@ -145,8 +154,9 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
 
 ## 8. Risks and unknowns
 
-- **Bitmap formats and coprocessor commands.** `CMD_SNAPSHOT`, `CMD_INFLATE`, DMA streaming (`stream.cpp`) and any EVE bitmap formats beyond L4 are the least-known part of the renderer work. Inventory them first.
+- **Bitmap formats and coprocessor commands.** `CMD_SNAPSHOT2`, `CMD_LOADIMAGE`, DMA streaming (`stream.cpp`) and any EVE bitmap formats beyond L4 are the least-known part of the renderer work. Inventory them first.
 - **Hidden hardware assumptions.** Timing loops, `millis()`/`micros()` from the Teensy core, `elapsedMillis`, and any busy-waits on display "coprocessor empty" flags. The Apple `DisplayDriver` should report the coprocessor as always empty.
+- **Two interrupt-masking mechanisms.** Besides the audio-interrupt pair, `core/config/config.h` has `DISABLE_GLOBAL_INTERRUPTS` (inline `CPSID i`). `AudioStream` allocation calls it from both the audio and the main side. Both pairs must share one host mechanism, and both must be no-ops when called from the audio thread itself.
 - **Global initialisation order.** Many globals (`engine`, `sequencer`, `display`, `mtProject`, …) assume a hardware boot sequence (`core/source/Tracker.cpp` `init()`).
 - **iPad later.** Keep shared code free of AppKit. Use only Metal, Core Audio, CoreMIDI and Foundation below the app shell.
 
