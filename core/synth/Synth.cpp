@@ -459,9 +459,9 @@ void Synth::copyWorkspacePatches(const char* sourceProjectPath, const char* dest
     for (int part = 0; part < kSynthParts; part++)
     {
         std::string srcFile =
-          fmt::format("{}\\{}{}", sourceProjectPath, part, polysynth::PatchStore::kFileExtension);
+          fmt::format("{}{}{}{}", sourceProjectPath, FileSystem::kPathSeparator, part, polysynth::PatchStore::kFileExtension);
         std::string dstFile = fmt::format(
-          "{}\\{}{}", destinationProjectPath, part, polysynth::PatchStore::kFileExtension);
+          "{}{}{}{}", destinationProjectPath, FileSystem::kPathSeparator, part, polysynth::PatchStore::kFileExtension);
         cFileTransfer::copyFile(filesystem, srcFile.c_str(), dstFile.c_str());
     }
 }
