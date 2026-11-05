@@ -25,7 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AppModel.shared.shutdown(completion: reply)
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-            if !replied { print("shutdown watchdog: teardown still running after 5 s, quitting anyway") }
+            lock.lock(); let already = replied; lock.unlock()
+            if !already {
+                print("shutdown watchdog: teardown still running after 5 s, quitting anyway")
+                fflush(stdout); fflush(stderr)
+                // AppKit's exit() would run C++ static destructors while the tracker/render
+                // threads may still be running: leave without them.
+                _exit(0)
+            }
             reply()
         }
         return .terminateLater
@@ -36,9 +43,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleTestArguments(_ model: AppModel) {
         let a = CommandLine.arguments
         func value(_ k: String) -> String? { a.firstIndex(of: k).flatMap { $0 + 1 < a.count ? a[$0 + 1] : nil } }
+        #if TRACKERCE_TEST_HOOKS
         if a.contains("--test-clock-play") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { model.bridge.testClockAndPlay() }
         }
+        #endif
         if let path = value("--screenshot") {
             let delay = Double(value("--screenshot-after") ?? "6") ?? 6
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -47,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.showDebug = a.contains("--debug")
             }
         }
+        #if TRACKERCE_TEST_HOOKS
         if a.contains("--test-key") {
             // Synthetic keyDown/keyUp for the '1' key (pad 0) through the window: proves the
             // MTKView is first responder and the press reaches InputApple.
@@ -68,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        #endif
         if a.contains("--debug") { model.showDebug = true }
         if let s = value("--quit-after"), let t = Double(s) {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) {

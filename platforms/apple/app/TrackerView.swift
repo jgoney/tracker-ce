@@ -12,17 +12,25 @@ final class TrackerMTKView: MTKView {
         window?.makeFirstResponder(self)
         // SwiftUI may reassign the first responder after the window appears: claim it again.
         DispatchQueue.main.async { [weak self] in self?.window?.makeFirstResponder(self) }
-        NotificationCenter.default.removeObserver(self)
-        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification,
-                                               object: window, queue: .main) { [weak self] _ in
+        removeObservers()
+        guard let w = window else { return }
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                                        object: w, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             self.window?.makeFirstResponder(self)
-        }
-        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification,
-                                               object: window, queue: .main) { [weak self] _ in
+        })
+        observers.append(nc.addObserver(forName: NSWindow.didResignKeyNotification,
+                                        object: w, queue: .main) { [weak self] _ in
             self?.router?.releaseAll()
-        }
+        })
     }
+    private var observers: [NSObjectProtocol] = []
+    private func removeObservers() {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+    }
+    deinit { removeObservers() }
     override func keyDown(with e: NSEvent) {
         if e.keyCode == 53 && AppModel.shared.showKeyMap { AppModel.shared.showKeyMap = false; return }
         if router?.keyDown(e) != true { super.keyDown(with: e) }

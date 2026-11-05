@@ -153,6 +153,10 @@ final class KeyRouter {
     }
 
     func scroll(_ e: NSEvent) {
+        // Trackpad inertia (momentum phase) must not keep turning the encoder after the fingers
+        // lift; a new gesture starts from a clean accumulator.
+        if e.phase.contains(.began) || e.phase.contains(.mayBegin) { scrollAccum = 0 }
+        if !e.momentumPhase.isEmpty { scrollAccum = 0; return }
         let step: CGFloat = e.hasPreciseScrollingDeltas ? 14 : 1
         scrollAccum += e.scrollingDeltaY
         let clicks = Int((scrollAccum / step).rounded(.towardZero))

@@ -1,11 +1,24 @@
 enable_language(Swift)
 
+# Test hooks (TRACKERCE_TEST_HANG_* env, --test-key, --test-clock-play, isPadDown, testClockAndPlay)
+# are compiled in by default for Debug only: a Release app does not ship them.
+option(TRACKERCE_TEST_HOOKS "Compile the automated-check test hooks into the app" OFF)
+if(TRACKERCE_TEST_HOOKS OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_test_hooks ON)
+else()
+    set(_test_hooks OFF)
+endif()
+
 add_library(TrackerBridge STATIC Bridge.mm)
 target_include_directories(TrackerBridge PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(TrackerBridge PRIVATE
     -std=gnu++20 -fobjc-arc -fno-rtti -fno-exceptions -Wall -Wextra "SHELL:-include cstdint")
 target_link_libraries(TrackerBridge PUBLIC PolySynthStub TrackerMetal TrackerApple TrackerCore
     "-framework Foundation" "-framework Metal" "-framework CoreGraphics")
+
+if(_test_hooks)
+    target_compile_definitions(TrackerBridge PUBLIC TRACKERCE_TEST_HOOKS=1)
+endif()
 
 set(APP_NAME "Tracker CE (unofficial)")
 add_executable(TrackerCE MACOSX_BUNDLE
@@ -30,5 +43,9 @@ target_compile_options(TrackerCE PRIVATE
     "SHELL:-import-objc-header ${CMAKE_CURRENT_LIST_DIR}/Bridge.h")
 target_link_libraries(TrackerCE PRIVATE TrackerBridge c++
     "-framework SwiftUI" "-framework AppKit" "-framework MetalKit")
+if(_test_hooks)
+    # The bridging header and the Swift sources both see the hooks.
+    target_compile_options(TrackerCE PRIVATE -DTRACKERCE_TEST_HOOKS "SHELL:-Xcc -DTRACKERCE_TEST_HOOKS=1")
+endif()
 target_link_options(TrackerCE PRIVATE -target ${_swift_target})
 add_dependencies(TrackerCE TrackerBridge)

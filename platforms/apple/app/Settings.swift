@@ -11,7 +11,8 @@ final class AppModel: ObservableObject {
     let router: KeyRouter
 
     @Published var audioDevices: [String] = ["System Default"]
-    @Published var midiDestinations: [String] = []
+    @Published var midiDestinations: [String] = []     // display names
+    @Published var midiDestinationKeys: [String] = []   // identity keys, index for index
     @Published var audioStatus: String = "Starting…"
     @Published var devicesLoading = true
     @Published var showKeyMap = false
@@ -33,7 +34,6 @@ final class AppModel: ObservableObject {
 
     let sdRoot: String
     private var timer: Timer?
-    private(set) var sdRootWasInvalid = false
 
     private init() {
         let stored = UserDefaults.standard.string(forKey: "sdRoot")
@@ -51,6 +51,12 @@ final class AppModel: ObservableObject {
         bridge.onAudioStatus = { [weak self] s in
             DispatchQueue.main.async { self?.audioStatus = s }
         }
+        // HAL device-list and CoreMIDI setup changes: the bridge refreshed off-main, publish here.
+        bridge.onDevicesChanged = { [weak self] in
+            guard let self = self else { return }
+            self.publishDevices()
+            self.applyMidi() // re-resolve the persisted choice (a replugged device reattaches)
+        }
     }
 
     func start() {
@@ -67,11 +73,27 @@ final class AppModel: ObservableObject {
     func refreshDevices() {
         devicesLoading = true
         bridge.refreshDevices { [weak self] in
-            guard let self = self else { return }
-            self.audioDevices = self.bridge.audioDevices()
-            self.midiDestinations = self.bridge.midiDestinations()
-            self.devicesLoading = false
+            self?.publishDevices()
+            self?.devicesLoading = false
         }
+    }
+
+    /// Main thread: copies the bridge's cached lists (no HAL / CoreMIDI access).
+    private func publishDevices() {
+        audioDevices = bridge.audioDevices()
+        midiDestinations = bridge.midiDestinations()
+        midiDestinationKeys = bridge.midiDestinationKeys()
+    }
+
+    /// Picker entries for the MIDI destination: the live list, plus the saved choice when that
+    /// device is currently absent (so the picker keeps showing it).
+    var midiChoices: [(key: String, name: String)] {
+        var out = zip(midiDestinationKeys, midiDestinations).map { (key: $0, name: $1) }
+        if !midiDestination.isEmpty, !out.contains(where: { $0.key == midiDestination }) {
+            let name = midiDestination.firstIndex(of: "|").map { String(midiDestination[midiDestination.index(after: $0)...]) } ?? midiDestination
+            out.append((key: midiDestination, name: name + " (not connected)"))
+        }
+        return out
     }
 
     var audioDeviceIndex: Int { max(0, audioDevices.firstIndex(of: audioDevice) ?? 0) }
@@ -79,18 +101,18 @@ final class AppModel: ObservableObject {
 
     /// Applies the current device + channel choice off the main thread.
     func applyAudio() {
-        let idx = audioDeviceIndex
+        let name = audioDevice
         let n = channelCount
         let l = min(leftChannel, n - 1), r = min(rightChannel, n - 1)
         audioStatus = "Opening…"
         DispatchQueue.global(qos: .userInitiated).async { [bridge] in
-            _ = bridge.selectAudioDevice(idx, left: Int32(l), right: Int32(r))
+            _ = bridge.selectAudioDeviceNamed(name, left: Int32(l), right: Int32(r))
         }
     }
 
     func applyMidi() {
-        let idx = midiDestinations.firstIndex(of: midiDestination) ?? -1
-        _ = bridge.selectMidiDestination(idx)
+        // By identity (unique id, falling back to name), resolved by the bridge at apply time.
+        bridge.selectMidiDestinationKey(midiDestination)
     }
 
     func chooseSDFolder() {
@@ -151,7 +173,7 @@ struct SettingsView: View {
             Section("MIDI output") {
                 Picker("Destination", selection: $m.midiDestination) {
                     Text("None (virtual source only)").tag("")
-                    ForEach(m.midiDestinations, id: \.self) { Text($0).tag($0) }
+                    ForEach(m.midiChoices, id: \.key) { Text($0.name).tag($0.key) }
                 }
                 .disabled(m.devicesLoading)
                 HStack {

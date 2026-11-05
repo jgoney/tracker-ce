@@ -8,6 +8,8 @@
 #include "mtMidi.h"
 #include "mtStructs.h"
 
+#include <CoreAudio/CoreAudio.h>
+#include <CoreMIDI/CoreMIDI.h>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -17,6 +19,25 @@
 namespace
 {
 void startDisplayNoop(Platform*) {}
+
+// MIDI destination identity string persisted by the app: "<kMIDIPropertyUniqueID>|<display name>".
+// A bare string (an older preference) is a name.
+std::string midiKeyFor(const MidiCoreMidi::DestinationInfo& d)
+{
+    return std::to_string(d.uniqueId) + "|" + d.name;
+}
+MidiCoreMidi::DestinationInfo parseMidiKey(const std::string& key)
+{
+    const size_t bar = key.find('|');
+    if (bar != std::string::npos && bar > 0)
+    {
+        char* end = nullptr;
+        const long v = strtol(key.c_str(), &end, 10);
+        if (end == key.c_str() + bar)
+            return { (int32_t)v, key.substr(bar + 1) };
+    }
+    return { 0, key };
+}
 } // namespace
 
 @implementation TCBridge
@@ -28,6 +49,12 @@ void startDisplayNoop(Platform*) {}
     id<MTLDevice> _device;
     dispatch_queue_t _enumQueue; // device enumeration (may hang)
     dispatch_queue_t _control; // serial: start / stop / device selection
+    dispatch_queue_t _listQueue; // serial: device list refreshes (HAL / CoreMIDI queries)
+    dispatch_queue_t _midiQueue; // serial: MIDI destination selection
+    dispatch_queue_t _notifyQueue; // device-change notifications (debounce, HAL listener)
+    std::atomic<bool> _changePending;
+    std::atomic<bool> _monitoring;
+    AudioObjectPropertyListenerBlock _halListener;
     std::atomic<bool> _running; // platform alive and input accepted
     std::atomic<bool> _stopped;
 
@@ -35,6 +62,8 @@ void startDisplayNoop(Platform*) {}
     std::vector<CoreAudioOutput::DeviceInfo> _devices;
     NSArray<NSString*>* _audioNames;
     NSArray<NSString*>* _midiNames;
+    NSArray<NSString*>* _midiKeys;
+    int _defaultChannels; // output channels of the system default device (read off-main, cached)
     NSString* _status;
     std::string _prefDevice;
     int _prefL, _prefR;
@@ -50,6 +79,13 @@ void startDisplayNoop(Platform*) {}
     _enumQueue = dispatch_queue_create("local.trackerce.enum", DISPATCH_QUEUE_SERIAL);
     _audioNames = @[ @"System Default" ];
     _midiNames = @[];
+    _midiKeys = @[];
+    _defaultChannels = 2;
+    _changePending = false;
+    _monitoring = false;
+    _listQueue = dispatch_queue_create("local.trackerce.list", DISPATCH_QUEUE_SERIAL);
+    _midiQueue = dispatch_queue_create("local.trackerce.midi", DISPATCH_QUEUE_SERIAL);
+    _notifyQueue = dispatch_queue_create("local.trackerce.notify", DISPATCH_QUEUE_SERIAL);
     _status = @"Starting…";
     _prefL = 0;
     _prefR = 1;
@@ -132,12 +168,14 @@ void startDisplayNoop(Platform*) {}
         return NO;
     if (devId == 0)
         devId = CoreAudioOutput::defaultOutputDevice();
-    BOOL ok = devId != kAudioObjectUnknown && _out->open(devId, (uint8_t)l, (uint8_t)r);
-    if (!ok && devId != kAudioObjectUnknown)
+    if (devId == kAudioObjectUnknown)
     {
-        // open() failed on the requested device: CoreAudioOutput falls back on its own and reports
-        // through onStatus, so just try to start whatever it ended up with.
+        [self setStatus:@"Failed: no audio output device found"];
+        return NO;
     }
+    // If open() fails on the requested device CoreAudioOutput falls back on its own and reports
+    // through onStatus, so start whatever it ended up with either way.
+    const BOOL ok = _out->open(devId, (uint8_t)l, (uint8_t)r);
     _out->start();
     return ok;
 }
@@ -161,9 +199,11 @@ void startDisplayNoop(Platform*) {}
         // Enumeration can hang on a bad driver: do it on its own queue so -stop (on _control)
         // never waits behind it, then hop back to open the device.
         dispatch_async(self->_enumQueue, ^{
+#ifdef TRACKERCE_TEST_HOOKS
             if (getenv("TRACKERCE_TEST_HANG_ENUM")) // test hook: hung listOutputDevices
                 for (;;)
                     sleep(1000);
+#endif
             AudioDeviceID id = 0;
             if (!dev.empty())
             {
@@ -171,21 +211,14 @@ void startDisplayNoop(Platform*) {}
                     if (d.name == dev && (uint32_t)std::max(l, r) < d.outChannels)
                         id = d.id;
             }
-            int midiIdx = -1;
-            if (!midi.empty())
-            {
-                auto dests = MidiCoreMidi::listDestinations();
-                for (size_t i = 0; i < dests.size(); i++)
-                    if (dests[i] == midi)
-                        midiIdx = (int)i;
-            }
             dispatch_async(self->_control, ^{
                 if (self->_stopped)
                     return;
                 [self openAndStart:id left:id ? l : 0 right:id ? r : 1];
-                if (midiIdx >= 0)
-                    self->_platform->midi().selectDestination(midiIdx);
             });
+            if (!midi.empty())
+                [self selectMidiDestinationKey:[NSString stringWithUTF8String:midi.c_str()]];
+            [self startMonitoring];
         });
     });
 }
@@ -197,18 +230,29 @@ void startDisplayNoop(Platform*) {}
             return;
         self->_stopped = true;
         self->_running = false;
+#ifdef TRACKERCE_TEST_HOOKS
         if (getenv("TRACKERCE_TEST_HANG_STOP")) // test hook: a wedged teardown
             for (;;)
                 sleep(1000);
+#endif
         self->_out->stop();
         self->_rt->stop();
+        if (self->_halListener)
+        {
+            AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                             kAudioObjectPropertyElementMain };
+            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &a, self->_notifyQueue, self->_halListener);
+            AudioObjectPropertyAddress d = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                             kAudioObjectPropertyElementMain };
+            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &d, self->_notifyQueue, self->_halListener);
+            self->_halListener = nil;
+        }
         // After the tracker thread has stopped: the hook is a plain std::function it invokes.
         if (self->_renderer)
             MetalRenderer::detachSnapshotHook(self->_platform->display());
         self->_platform->midi().detachOutput(*self->_out);
-        // Everything stays allocated until dealloc/process exit: the Tracker singleton still
-        // points at the platform. Members destroy in reverse order (output, runtime, platform
-        // with its MidiCoreMidi), which is the documented teardown order.
+        // Nothing is destroyed here: everything stays allocated until process exit (the Tracker
+        // singleton still points at the platform, and the bridge lives as long as the app).
     });
 }
 
@@ -230,20 +274,33 @@ void startDisplayNoop(Platform*) {}
 
 - (void)refreshDevices:(void (^)(void))done
 {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    // Every HAL / CoreMIDI query happens here, off the main thread and outside _lock; the results
+    // (including the default device's channel count) are cached for the UI accessors.
+    dispatch_async(_listQueue, ^{
         auto devs = CoreAudioOutput::listOutputDevices(); // may block on a hung driver
-        auto midi = MidiCoreMidi::listDestinations();
+        const AudioDeviceID def = CoreAudioOutput::defaultOutputDevice();
+        auto midi = MidiCoreMidi::listDestinationInfos();
+        int defChannels = 2;
+        for (auto& d : devs)
+            if (d.id == def)
+                defChannels = (int)d.outChannels;
         NSMutableArray* an = [NSMutableArray arrayWithObject:@"System Default"];
         for (auto& d : devs)
             [an addObject:[NSString stringWithUTF8String:d.name.c_str()] ?: @"?"];
         NSMutableArray* mn = [NSMutableArray array];
+        NSMutableArray* mk = [NSMutableArray array];
         for (auto& m : midi)
-            [mn addObject:[NSString stringWithUTF8String:m.c_str()] ?: @"?"];
+        {
+            [mn addObject:[NSString stringWithUTF8String:m.name.c_str()] ?: @"?"];
+            [mk addObject:[NSString stringWithUTF8String:midiKeyFor(m).c_str()] ?: @"0|?"];
+        }
         {
             std::lock_guard<std::mutex> g(self->_lock);
             self->_devices = devs;
             self->_audioNames = an;
             self->_midiNames = mn;
+            self->_midiKeys = mk;
+            self->_defaultChannels = defChannels;
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (done)
@@ -252,36 +309,93 @@ void startDisplayNoop(Platform*) {}
     });
 }
 
+// HAL device-list / default-output and CoreMIDI setup-change notifications: refresh both lists off
+// the main thread (debounced: a plug event fires several), then publish on main.
+- (void)devicesChanged
+{
+    if (_stopped || _changePending.exchange(true))
+        return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), _notifyQueue, ^{
+        self->_changePending = false;
+        if (self->_stopped)
+            return;
+        [self refreshDevices:^{
+            void (^cb)(void) = self.onDevicesChanged;
+            if (cb)
+                cb();
+        }];
+    });
+}
+
+- (void)startMonitoring
+{
+    if (_stopped || _monitoring.exchange(true))
+        return;
+    __weak TCBridge* weak = self;
+    dispatch_async(_notifyQueue, ^{
+        TCBridge* me = weak;
+        if (!me || me->_stopped)
+            return;
+        me->_halListener = ^(UInt32, const AudioObjectPropertyAddress*) { [weak devicesChanged]; };
+        AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                         kAudioObjectPropertyElementMain };
+        AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &a, me->_notifyQueue, me->_halListener);
+        AudioObjectPropertyAddress d = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                         kAudioObjectPropertyElementMain };
+        AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &d, me->_notifyQueue, me->_halListener);
+    });
+    // CoreMIDI delivers setup-change notifications on the run loop of the thread that created the
+    // client: give it a thread that spins one.
+    NSThread* t = [[NSThread alloc] initWithBlock:^{
+        MIDIClientRef client = 0;
+        MIDIClientCreateWithBlock(CFSTR("Tracker CE device watch"), &client, ^(const MIDINotification* n) {
+            if (n->messageID == kMIDIMsgSetupChanged)
+                [weak devicesChanged];
+        });
+        for (;;)
+        {
+            TCBridge* me = weak;
+            if (!me || me->_stopped)
+                break;
+            me = nil;
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, false);
+        }
+        if (client)
+            MIDIClientDispose(client);
+    }];
+    t.name = @"local.trackerce.midi-watch";
+    [t start];
+}
+
 - (NSArray<NSString*>*)audioDevices
 {
     std::lock_guard<std::mutex> g(_lock);
     return _audioNames;
 }
 
+// Cached by -refreshDevices: (never queries the HAL: this is called from SwiftUI body evaluation).
 - (int)audioChannelCountAtIndex:(NSInteger)i
 {
     std::lock_guard<std::mutex> g(_lock);
     if (i <= 0)
-    {
-        AudioDeviceID def = CoreAudioOutput::defaultOutputDevice();
-        for (auto& d : _devices)
-            if (d.id == def)
-                return (int)d.outChannels;
-        return 2;
-    }
+        return _defaultChannels;
     return i - 1 < (NSInteger)_devices.size() ? (int)_devices[i - 1].outChannels : 2;
 }
 
-- (BOOL)selectAudioDevice:(NSInteger)i left:(int)l right:(int)r
+- (BOOL)selectAudioDeviceNamed:(NSString*)name left:(int)l right:(int)r
 {
     __block BOOL ok = NO;
     dispatch_sync(_control, ^{
         AudioDeviceID id = 0;
+        const std::string want = name.UTF8String ?: "";
+        if (!want.empty())
         {
+            // Resolved against the current list at apply time, by name.
             std::lock_guard<std::mutex> g(self->_lock);
-            if (i > 0 && i - 1 < (NSInteger)self->_devices.size())
-                id = self->_devices[i - 1].id;
-            else if (i > 0)
+            for (auto& d : self->_devices)
+                if (d.name == want)
+                    id = d.id;
+            if (!id)
                 return;
         }
         ok = [self openAndStart:id left:l right:r];
@@ -295,11 +409,27 @@ void startDisplayNoop(Platform*) {}
     return _midiNames;
 }
 
-- (BOOL)selectMidiDestination:(NSInteger)i
+- (NSArray<NSString*>*)midiDestinationKeys
 {
-    if (_stopped)
-        return NO;
-    return _platform->midi().selectDestination((int)i);
+    std::lock_guard<std::mutex> g(_lock);
+    return _midiKeys;
+}
+
+- (void)selectMidiDestinationKey:(NSString*)key
+{
+    const std::string k = key.UTF8String ?: "";
+    dispatch_async(_midiQueue, ^{
+        if (self->_stopped)
+            return;
+        if (k.empty())
+        {
+            self->_platform->midi().selectDestination(-1);
+            return;
+        }
+        // Resolved against the live CoreMIDI list now, by unique id then name.
+        const auto id = parseMidiKey(k);
+        self->_platform->midi().selectDestinationByIdentity(id.uniqueId, id.name);
+    });
 }
 
 - (void)setMidiOffsetMs:(int)ms
@@ -331,6 +461,7 @@ void startDisplayNoop(Platform*) {}
     return frame && _renderer->renderToPNG(*frame, path.fileSystemRepresentation);
 }
 
+#ifdef TRACKERCE_TEST_HOOKS
 - (BOOL)isPadDown:(int)i
 {
     return _running && i >= 0 && i < 48 && _platform->input().pads().isButtonPressed(i);
@@ -338,11 +469,13 @@ void startDisplayNoop(Platform*) {}
 
 - (void)testClockAndPlay
 {
-    mtConfig.midi.clkOut = clockOut_usb;
+    // The config write runs on the tracker thread (drained by InputApple::dispatch), not here.
+    _platform->input().postTask([] { mtConfig.midi.clkOut = clockOut_usb; });
     [self postButton:23 down:YES];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         [self postButton:23 down:NO];
     });
 }
+#endif
 
 @end
