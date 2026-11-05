@@ -88,6 +88,10 @@ bool openOutput(CoreAudioOutput& out, uint32_t deviceId, int l, int r)
     if (!out.open(deviceId, (uint8_t)l, (uint8_t)r)) // bounded: a hung driver times out after 2 s
     {
         std::fprintf(stderr, "cannot open device %u (failed or unresponsive)\n", deviceId);
+        // The fallback (default output) is already running behind the failed open, and with a hung
+        // driver the HAL may block its teardown too: a CLI that failed has nothing to clean up.
+        std::fflush(nullptr);
+        _exit(1);
         return false;
     }
     std::printf("device %u: %.0f Hz%s, %u-frame buffer, latency %.2f ms\n",

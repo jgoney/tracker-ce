@@ -16,6 +16,7 @@
 namespace
 {
 using namespace std::chrono_literals;
+
 constexpr auto kOpTimeout = 2000ms;
 constexpr UInt32 kWantedBufferFrames = 256; // ring is 4 blocks (512 frames): keep well inside it
 constexpr uint64_t kStallNs = 1000000000ull; // running with no IOProc cycle for this long = dead
@@ -155,6 +156,7 @@ struct Shared
     std::atomic<uint64_t> cycles{ 0 };
     std::atomic<uint64_t> reopens{ 0 };
     std::atomic<uint64_t> lastCycleNs{ 0 };
+    std::atomic<bool> cycleEnabled{ true }; // cleared by the destructor: onCycle is never called after
     std::atomic<bool> freezeClock{ false }; // test: the IOProc stops reporting liveness
     std::function<void(uint64_t, uint64_t, size_t)> onCycle;
 };
@@ -172,33 +174,34 @@ enum class Event
 
 namespace
 {
-// One opened device: AUHAL unit + optional converter + IOProc scratch. Built and torn down on a
-// worker; the IOProc holds a raw pointer, valid until teardown() returns.
+// One opened device: AUHAL unit + optional converter + IOProc scratch. Built and torn down on the
+// worker; the IOProc holds a raw pointer, valid until teardown() returns. A Dev is only ever
+// freed after teardown() (see makeDev's deleter): no HAL call ever happens in ~Dev.
 struct Dev
 {
     AudioDeviceID id = kAudioObjectUnknown;
     std::string name;
-    AudioUnit unit = nullptr;
+    AudioUnit unit = nullptr; // null for a test fake
     AudioConverterRef conv = nullptr;
     std::atomic<AudioRuntime*> rt{ nullptr };
     std::shared_ptr<Shared> sh;
     uint32_t channels = 0, lc = 0, rc = 1, maxFrames = 0, bufFrames = 0;
     double rate = 44100, latency = 0;
     bool converter = false;
+    bool fake = false;
     std::vector<float> srcL, srcR, outL, outR;
     size_t srcCap = 0;
     void* wg = nullptr;
     std::atomic<bool> started{ false };
-    bool torn = false;
+    std::atomic<bool> torn{ false };
     std::function<void(AudioDeviceID)> onTeardown; // test hook
     void* listenCtx = nullptr; // weak_ptr<Impl>* (deliberately leaked: see addListeners)
 
     void removeListeners();
     void teardown()
     {
-        if (torn)
+        if (torn.exchange(true))
             return;
-        torn = true;
         rt.store(nullptr);
         if (onTeardown)
             onTeardown(id);
@@ -217,9 +220,31 @@ struct Dev
         }
         started = false;
     }
-    ~Dev() { teardown(); }
+};
+
+// An untorn Dev must never be torn down inline on whatever thread drops the last reference (that
+// would be an unbounded HAL call). If one is dropped untorn (its worker is wedged and abandoned)
+// it is leaked on purpose.
+std::shared_ptr<Dev> makeDev()
+{
+    return std::shared_ptr<Dev>(new Dev,
+                                [](Dev* d)
+                                {
+                                    if (d->torn.load())
+                                        delete d;
+                                });
+}
+
+enum class Timed
+{
+    Done,
+    OpTimeout,   // the op itself ran longer than its bound
+    NeverStarted // never reached the worker (queue wedged behind an abandoned op)
 };
 } // namespace
+
+std::vector<CoreAudioOutput::DeviceInfo> listOutputDevicesSkipping(const std::set<AudioDeviceID>& skip);
+AudioDeviceID builtInSkipping(const std::set<AudioDeviceID>& skip);
 
 struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Impl>
 {
@@ -237,11 +262,24 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
         Status status;
         std::string name;
     };
+    struct CmdState
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false, result = false;
+    };
+    struct CmdMsg
+    {
+        std::shared_ptr<Impl> self;
+        std::function<bool()> fn;
+        std::shared_ptr<CmdState> st;
+        bool whenDying;
+    };
     using TestHooks = CoreAudioOutputTestHooks;
 
     AudioRuntime& rt;
     std::shared_ptr<Shared> sh = std::make_shared<Shared>();
-    dispatch_queue_t queue = nullptr;
+    dispatch_queue_t queue = nullptr; // serial: ALL control work runs here
     dispatch_source_t timer = nullptr;
     std::weak_ptr<Impl>* sysCtx = nullptr; // leaked: see addSystemListeners
 
@@ -253,6 +291,7 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
     bool following = false;
     bool dying = false;
     bool sysListening = false;
+    uint64_t openGen = 0; // bumped by every public open(): older fallbacks/opens stand down
     uint8_t lc = 0, rc = 1;
     std::set<AudioDeviceID> unresponsive;
     std::function<void(Status, std::string)> onStatus;
@@ -267,6 +306,24 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
         if (timer)
             dispatch_release(timer);
         dispatch_release(queue);
+        if (worker)
+            worker->stop(); // ends the (idle) worker thread; a wedged one is already abandoned
+    }
+
+    bool isDying()
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        return dying;
+    }
+    bool stale(uint64_t gen)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        return dying || openGen != gen;
+    }
+    uint64_t generation()
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        return openGen;
     }
 
     // -- queue plumbing
@@ -278,7 +335,8 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
             std::function<void(Status, std::string)> cb;
             {
                 std::lock_guard<std::mutex> g(m->self->mtx);
-                cb = m->self->onStatus;
+                if (!m->self->dying)
+                    cb = m->self->onStatus;
             }
             if (cb)
                 cb(m->status, m->name);
@@ -292,7 +350,35 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
     }
     void postStatus(Status s, std::string name)
     {
+        {
+            std::lock_guard<std::mutex> g(mtx);
+            if (dying)
+                return;
+        }
         dispatch_async_f(queue, new Msg{ shared_from_this(), Event::Watchdog, true, s, std::move(name) }, &runMsg);
+    }
+    static void runCmdFn(void* p)
+    {
+        std::unique_ptr<CmdMsg> m((CmdMsg*)p);
+        bool res = false;
+        if (m->whenDying || !m->self->isDying())
+            res = m->fn();
+        std::lock_guard<std::mutex> g(m->st->m);
+        m->st->result = res;
+        m->st->done = true;
+        m->st->cv.notify_all();
+    }
+    // Runs `fn` on the control queue and waits for it at most `wait` from now. On the deadline
+    // returns false; the command is still queued and completes later (its intent was recorded
+    // by the caller), reporting through onStatus.
+    bool runCmd(std::function<bool()> fn, std::chrono::milliseconds wait = 2500ms, bool whenDying = false)
+    {
+        auto st = std::make_shared<CmdState>();
+        dispatch_async_f(queue, new CmdMsg{ shared_from_this(), std::move(fn), st, whenDying }, &runCmdFn);
+        std::unique_lock<std::mutex> g(st->m);
+        if (!st->cv.wait_for(g, wait, [&] { return st->done; }))
+            return false;
+        return st->result;
     }
     void startTimer()
     {
@@ -310,48 +396,87 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
     }
 
     // -- hooks
+    TestHooks hooksCopy()
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        return hooks;
+    }
+    // Even property reads can hang on a broken virtual device, so every HAL read made on the
+    // control queue goes through the worker with the same bound (def on timeout).
+    template <class T>
+    T bounded(T def, std::function<T()> f, AudioDeviceID blame = kAudioObjectUnknown)
+    {
+        auto res = std::make_shared<T>(def);
+        const Timed t = runTimed([res, f] { *res = f(); });
+        if (t == Timed::OpTimeout && blame != kAudioObjectUnknown)
+            markUnresponsive(blame);
+        return t == Timed::Done ? *res : def;
+    }
     bool alive(AudioDeviceID id)
     {
-        TestHooks h;
-        {
-            std::lock_guard<std::mutex> g(mtx);
-            h = hooks;
-        }
-        return h.alive ? h.alive(id) : deviceAliveReal(id);
+        auto h = hooksCopy();
+        if (h.alive)
+            return h.alive(id);
+        return bounded<bool>(false, [id] { return deviceAliveReal(id); }, id); // a hung read = dead
+    }
+    double rateOf(AudioDeviceID id)
+    {
+        return bounded<double>(0.0, [id] { return nominalRate(id); }, id);
     }
     AudioDeviceID defaultDev()
     {
-        std::function<AudioDeviceID()> f;
-        {
-            std::lock_guard<std::mutex> g(mtx);
-            f = hooks.defaultDevice;
-        }
-        return f ? f() : CoreAudioOutput::defaultOutputDevice();
+        auto h = hooksCopy();
+        if (h.defaultDevice)
+            return h.defaultDevice();
+        return bounded<AudioDeviceID>(kAudioObjectUnknown, [] { return CoreAudioOutput::defaultOutputDevice(); });
     }
     AudioDeviceID builtinDev()
     {
-        std::function<AudioDeviceID()> f;
+        std::set<AudioDeviceID> skip;
         {
             std::lock_guard<std::mutex> g(mtx);
-            f = hooks.builtinDevice;
+            if (hooks.builtinDevice)
+                return hooks.builtinDevice();
+            skip = unresponsive;
         }
-        return f ? f() : CoreAudioOutput::builtInOutputDevice();
+        return bounded<AudioDeviceID>(kAudioObjectUnknown, [skip] { return builtInSkipping(skip); });
+    }
+    bool present(AudioDeviceID id)
+    {
+        std::set<AudioDeviceID> none;
+        return bounded<bool>(false,
+                             [id]
+                             {
+                                 for (auto& i : listOutputDevicesSkipping({}))
+                                     if (i.id == id)
+                                         return true;
+                                 return false;
+                             },
+                             id);
     }
     bool isUnresponsive(AudioDeviceID id)
     {
         std::lock_guard<std::mutex> g(mtx);
         return unresponsive.count(id) != 0;
     }
+    void markUnresponsive(AudioDeviceID id)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        unresponsive.insert(id);
+    }
 
-    // -- run `f` on the open worker, waiting at most kOpTimeout. `cleanup` runs on the worker if
-    // the caller already gave up (so a late result does not leak a device).
-    bool runTimed(std::function<void()> f, std::function<void()> cleanup = {})
+    // -- run `f` on the worker. The bound runs from when the op STARTS executing on the worker
+    // (so a queued op is not blamed for time spent behind another). `cleanup` runs on the worker
+    // if the caller already gave up (so a late result does not leak a device). Called from the
+    // control queue only (serialised), so the worker is idle unless it was just abandoned.
+    Timed runTimed(std::function<void()> f, std::function<void()> cleanup = {}, std::chrono::milliseconds bound = kOpTimeout)
     {
         struct St
         {
             std::mutex m;
             std::condition_variable cv;
-            bool done = false, abandoned = false;
+            bool started = false, done = false, abandoned = false;
+            std::chrono::steady_clock::time_point startedAt;
         };
         auto st = std::make_shared<St>();
         std::shared_ptr<Worker> w;
@@ -367,6 +492,9 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
                 std::lock_guard<std::mutex> g(st->m);
                 if (st->abandoned)
                     return;
+                st->started = true;
+                st->startedAt = std::chrono::steady_clock::now();
+                st->cv.notify_all();
             }
             f();
             std::lock_guard<std::mutex> g(st->m);
@@ -379,22 +507,25 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
             st->done = true;
             st->cv.notify_all();
         });
+        const auto preDeadline = std::chrono::steady_clock::now() + bound;
         std::unique_lock<std::mutex> g(st->m);
-        if (st->cv.wait_for(g, kOpTimeout, [&] { return st->done; }))
-            return true;
+        for (;;)
+        {
+            if (st->done)
+                return Timed::Done;
+            const auto deadline = st->started ? st->startedAt + bound : preDeadline;
+            if (std::chrono::steady_clock::now() >= deadline)
+                break;
+            st->cv.wait_until(g, deadline);
+        }
+        const Timed res = st->started ? Timed::OpTimeout : Timed::NeverStarted;
         st->abandoned = true;
         g.unlock();
         std::lock_guard<std::mutex> g2(mtx);
-        if (worker == w) // the next call gets a fresh worker; this one is abandoned
+        if (worker == w) // the next op gets a fresh worker; this one is abandoned
             worker.reset();
         w->stop();
-        return false;
-    }
-
-    void markUnresponsive(AudioDeviceID id)
-    {
-        std::lock_guard<std::mutex> g(mtx);
-        unresponsive.insert(id);
+        return res;
     }
 
     // -- building a device (worker thread)
@@ -407,15 +538,19 @@ struct CoreAudioOutput::Impl : std::enable_shared_from_this<CoreAudioOutput::Imp
     void addSystemListeners();
     void removeSystemListeners();
 
-    // -- control (caller threads and the control queue; never hold mtx across these)
-    // Opens `id` (bounded by the timeout). null on failure.
+    // -- control: everything below runs on the control queue only
     std::shared_ptr<Dev> tryOpen(AudioDeviceID id, uint8_t l, uint8_t r, bool requestRate, Err& err);
-    void install(std::shared_ptr<Dev> d, bool follow);
+    bool install(std::shared_ptr<Dev> d, bool follow); // false (nothing installed) once dying
+    void discard(std::shared_ptr<Dev> d);              // tear down a device that was not installed
     void teardownCur();
-    void syncRunState();
-    void fallback(AudioDeviceID avoid);
+    void abandonCur(const std::shared_ptr<Dev>& d);
+    bool syncRunState(); // false if the device failed or hung starting/stopping
+    void fallback(AudioDeviceID avoid, uint64_t gen);
     void handleEvent(Event ev);
-    void reopenSame();
+    void reopenSame(uint64_t gen);
+    bool cmdOpen(AudioDeviceID id, uint8_t l, uint8_t r, uint64_t gen);
+    bool cmdSync();
+    void cmdShutdown();
 };
 
 void Dev::removeListeners()
@@ -431,9 +566,9 @@ void Dev::removeListeners()
 
 // ---- discovery ------------------------------------------------------------------------------
 
-std::vector<CoreAudioOutput::DeviceInfo> CoreAudioOutput::listOutputDevices()
+std::vector<CoreAudioOutput::DeviceInfo> listOutputDevicesSkipping(const std::set<AudioDeviceID>& skip)
 {
-    std::vector<DeviceInfo> out;
+    std::vector<CoreAudioOutput::DeviceInfo> out;
     AudioObjectPropertyAddress a{ kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     UInt32 sz = 0;
     if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, nullptr, &sz) != noErr)
@@ -443,11 +578,18 @@ std::vector<CoreAudioOutput::DeviceInfo> CoreAudioOutput::listOutputDevices()
         return out;
     for (AudioDeviceID id : ids)
     {
+        if (skip.count(id)) // known-unresponsive: even a property read can hang on it
+            continue;
         const uint32_t ch = outputChannels(id);
         if (ch > 0)
             out.push_back({ id, deviceNameOf(id), ch });
     }
     return out;
+}
+
+std::vector<CoreAudioOutput::DeviceInfo> CoreAudioOutput::listOutputDevices()
+{
+    return listOutputDevicesSkipping({});
 }
 
 AudioDeviceID CoreAudioOutput::defaultOutputDevice()
@@ -458,15 +600,20 @@ AudioDeviceID CoreAudioOutput::defaultOutputDevice()
     return id;
 }
 
-AudioDeviceID CoreAudioOutput::builtInOutputDevice()
+AudioDeviceID builtInSkipping(const std::set<AudioDeviceID>& skip)
 {
-    for (auto& d : listOutputDevices())
+    for (auto& d : listOutputDevicesSkipping(skip))
     {
         UInt32 t = 0;
         if (getProp(d.id, kAudioDevicePropertyTransportType, t) && t == kAudioDeviceTransportTypeBuiltIn)
             return d.id;
     }
     return kAudioObjectUnknown;
+}
+
+AudioDeviceID CoreAudioOutput::builtInOutputDevice()
+{
+    return builtInSkipping({});
 }
 
 void CoreAudioOutput::route(const float* l, const float* r, size_t frames, float* out, uint32_t channels, uint32_t lc, uint32_t rc)
@@ -523,7 +670,7 @@ OSStatus CoreAudioOutput::Impl::renderCb(void* ref, AudioUnitRenderActionFlags*,
     sh.cycles.fetch_add(1, std::memory_order_relaxed);
     if (!sh.freezeClock.load(std::memory_order_relaxed))
         sh.lastCycleNs.store(nowNs(), std::memory_order_relaxed);
-    if (sh.onCycle)
+    if (sh.cycleEnabled.load(std::memory_order_relaxed) && sh.onCycle)
     {
         const size_t pos = rt->readPosition();
         sh.onCycle(ts->mHostTime, rt->blockIndexAt(pos), pos % AudioRuntime::kBlockFrames);
@@ -560,14 +707,29 @@ CoreAudioOutput::Impl::Err CoreAudioOutput::Impl::build(AudioDeviceID id, uint8_
 {
     std::function<void(AudioDeviceID)> before, beforeTear;
     {
-        std::lock_guard<std::mutex> g(mtx);
-        before = hooks.beforeOpen;
-        beforeTear = hooks.beforeTeardown;
+        auto h = hooksCopy();
+        before = h.beforeOpen;
+        beforeTear = h.beforeTeardown;
     }
     if (before)
         before(id);
     if (id == kAudioObjectUnknown)
         return Err::Failed;
+    TestHooks th = hooksCopy();
+    if (th.fakeOpen && th.fakeOpen(id))
+    {
+        auto d = makeDev(); // no HAL: a device object for the control logic tests
+        d->id = id;
+        d->name = "fake " + std::to_string(id);
+        d->fake = true;
+        d->sh = sh;
+        d->onTeardown = th.beforeTeardown;
+        d->channels = 2;
+        d->wg = (void*)(uintptr_t)id;
+        d->rt.store(&rt);
+        out = d;
+        return Err::Ok;
+    }
     const uint32_t devCh = outputChannels(id);
     if (devCh == 0)
         return Err::Failed;
@@ -606,7 +768,7 @@ CoreAudioOutput::Impl::Err CoreAudioOutput::Impl::build(AudioDeviceID id, uint8_
     UInt32 bufFrames = 0;
     getProp(id, kAudioDevicePropertyBufferFrameSize, bufFrames);
 
-    auto d = std::make_shared<Dev>();
+    auto d = makeDev();
     d->id = id;
     d->name = deviceNameOf(id);
     d->sh = sh;
@@ -763,7 +925,7 @@ OSStatus CoreAudioOutput::Impl::propertyCb(AudioObjectID, UInt32 n, const AudioO
     return noErr;
 }
 
-// ---- control --------------------------------------------------------------------------------
+// ---- control (control queue) ----------------------------------------------------------------
 
 std::shared_ptr<Dev> CoreAudioOutput::Impl::tryOpen(AudioDeviceID id, uint8_t l, uint8_t r, bool requestRate, Err& err)
 {
@@ -776,37 +938,55 @@ std::shared_ptr<Dev> CoreAudioOutput::Impl::tryOpen(AudioDeviceID id, uint8_t l,
         Err err = Err::Failed;
     };
     auto res = std::make_shared<Result>();
-    const bool ok = runTimed(
-      [this, id, l, r, requestRate, res]
-      {
-          // `this` stays valid: runTimed's task holds a shared_ptr to the Impl.
-          res->err = build(id, l, r, requestRate, res->dev);
-      },
+    const Timed t = runTimed(
+      [this, id, l, r, requestRate, res] { res->err = build(id, l, r, requestRate, res->dev); },
       [res]
       {
           if (res->dev)
               res->dev->teardown(); // late result after the caller gave up
       });
-    if (!ok)
-    {
-        markUnresponsive(id);
+    if (t == Timed::OpTimeout)
+        markUnresponsive(id); // its own op exceeded the bound
+    if (t != Timed::Done)
         return nullptr;
-    }
     err = res->err;
     return res->err == Err::Ok ? res->dev : nullptr;
 }
 
-void CoreAudioOutput::Impl::install(std::shared_ptr<Dev> d, bool follow)
+bool CoreAudioOutput::Impl::install(std::shared_ptr<Dev> d, bool follow)
 {
-    {
-        std::lock_guard<std::mutex> g(mtx);
-        cur = d;
-        following = follow;
-        lc = (uint8_t)d->lc;
-        rc = (uint8_t)d->rc;
-    }
+    // Under the lock so that ~CoreAudioOutput's `dying = true` fences it: no setWorkgroup (nor
+    // any use of the runtime) starts after the destructor has set the flag.
+    std::lock_guard<std::mutex> g(mtx);
+    if (dying)
+        return false;
+    cur = d;
+    following = follow;
+    lc = (uint8_t)d->lc;
+    rc = (uint8_t)d->rc;
     if (d->wg)
-        rt.setWorkgroup(d->wg); // never released: the render thread may still be joined to the old one
+    {
+        if (hooks.workgroupSink)
+            hooks.workgroupSink(d->wg);
+        else if (!d->fake)
+            rt.setWorkgroup(d->wg); // never released: the render thread may still be joined to the old one
+    }
+    return true;
+}
+
+void CoreAudioOutput::Impl::discard(std::shared_ptr<Dev> d)
+{
+    if (d && runTimed([d] { d->teardown(); }) == Timed::OpTimeout)
+        markUnresponsive(d->id);
+}
+
+void CoreAudioOutput::Impl::abandonCur(const std::shared_ptr<Dev>& d)
+{
+    // The op on `d` is wedged on an abandoned worker; the Dev stays owned by that op (and is
+    // leaked if it never returns). Nothing may tear it down inline.
+    std::lock_guard<std::mutex> g(mtx);
+    if (cur == d)
+        cur.reset();
 }
 
 void CoreAudioOutput::Impl::teardownCur()
@@ -817,60 +997,60 @@ void CoreAudioOutput::Impl::teardownCur()
         d = cur;
         cur.reset();
     }
-    if (!d)
-        return;
-    if (!runTimed([d] { d->teardown(); }))
-        markUnresponsive(d->id); // abandoned: the zombie task still owns the Dev
+    discard(d);
 }
 
 // Makes the IOProc state match the `running` intent for the current device.
-void CoreAudioOutput::Impl::syncRunState()
+bool CoreAudioOutput::Impl::syncRunState()
 {
-    for (int i = 0; i < 3; i++)
+    std::shared_ptr<Dev> d;
+    bool want;
+    TestHooks h;
     {
-        std::shared_ptr<Dev> d;
-        bool want;
-        {
-            std::lock_guard<std::mutex> g(mtx);
-            d = cur;
-            want = running;
-        }
-        if (!d || d->started.load() == want)
-            return;
-        const bool ok = runTimed(
-          [this, d, want]
-          {
-              if (d->torn)
-                  return;
-              if (want && !d->started.load())
-              {
-                  if (AudioOutputUnitStart(d->unit) == noErr)
-                  {
-                      sh->lastCycleNs.store(nowNs());
-                      d->started = true;
-                  }
-              }
-              else if (!want && d->started.load())
-              {
-                  AudioOutputUnitStop(d->unit);
-                  d->started = false;
-              }
-          });
-        if (!ok)
-        {
-            markUnresponsive(d->id);
-            std::lock_guard<std::mutex> g(mtx);
-            if (cur == d)
-                cur.reset(); // abandoned
-            return;
-        }
-        if (d->started.load() != want)
-            return; // the start failed: the watchdog / device events deal with it
+        std::lock_guard<std::mutex> g(mtx);
+        d = cur;
+        want = running;
+        h = hooks;
     }
+    if (!d || d->started.load() == want)
+        return true;
+    const Timed t = runTimed(
+      [this, d, want, h]
+      {
+          if (d->torn.load())
+              return;
+          if (want)
+          {
+              if (h.beforeStart)
+                  h.beforeStart(d->id);
+              if (!d->unit)
+                  d->started = true; // test fake
+              else if (AudioOutputUnitStart(d->unit) == noErr)
+              {
+                  sh->lastCycleNs.store(nowNs());
+                  d->started = true;
+              }
+          }
+          else
+          {
+              if (d->unit)
+                  AudioOutputUnitStop(d->unit);
+              d->started = false;
+          }
+      });
+    if (t == Timed::OpTimeout)
+    {
+        markUnresponsive(d->id); // a start/stop that hangs is a dead device
+        abandonCur(d);
+        return false;
+    }
+    return t == Timed::Done && d->started.load() == want;
 }
 
-void CoreAudioOutput::Impl::fallback(AudioDeviceID avoid)
+void CoreAudioOutput::Impl::fallback(AudioDeviceID avoid, uint64_t gen)
 {
+    if (stale(gen))
+        return;
     teardownCur();
     // Order: the system default, then the built-in output. The default can still be the dead
     // device for a moment: it is skipped, and the default-change notification retries.
@@ -885,21 +1065,25 @@ void CoreAudioOutput::Impl::fallback(AudioDeviceID avoid)
     bool opened = false;
     for (AudioDeviceID c : cands)
     {
+        if (stale(gen)) // dying, or the user opened something else meanwhile: stand down
+            return;
         if (c == avoid && !alive(c))
             continue;
         Err err;
         auto d = tryOpen(c, 0, 1, true, err);
         if (!d)
             continue;
-        install(d, true);
-        syncRunState();
-        bool wantRun, started;
+        if (!install(d, true)) // dying
         {
-            std::lock_guard<std::mutex> g(mtx);
-            wantRun = running;
-            started = d->started.load();
+            discard(d);
+            return;
         }
-        if (wantRun && !started) // would not start: next candidate
+        if (stale(gen)) // the user's open() wins
+        {
+            teardownCur();
+            return;
+        }
+        if (!syncRunState()) // would not start (or hung): next candidate
         {
             teardownCur();
             continue;
@@ -908,6 +1092,8 @@ void CoreAudioOutput::Impl::fallback(AudioDeviceID avoid)
         opened = true;
         break;
     }
+    if (stale(gen))
+        return;
     {
         std::lock_guard<std::mutex> g(mtx);
         following = true;
@@ -921,7 +1107,7 @@ void CoreAudioOutput::Impl::fallback(AudioDeviceID avoid)
         postStatus(Status::Failed, {});
 }
 
-void CoreAudioOutput::Impl::reopenSame()
+void CoreAudioOutput::Impl::reopenSame(uint64_t gen)
 {
     std::shared_ptr<Dev> d;
     uint8_t l, r;
@@ -935,15 +1121,30 @@ void CoreAudioOutput::Impl::reopenSame()
         return;
     const AudioDeviceID id = d->id;
     teardownCur();
+    if (stale(gen))
+        return;
     Err err;
     auto nd = tryOpen(id, l, r, false, err); // follow the new rate through the converter
     if (!nd)
     {
-        fallback(id);
+        fallback(id, gen);
         return;
     }
-    install(nd, id == defaultDev());
-    syncRunState();
+    if (!install(nd, id == defaultDev()))
+    {
+        discard(nd);
+        return;
+    }
+    if (stale(gen))
+    {
+        teardownCur();
+        return;
+    }
+    if (!syncRunState())
+    {
+        fallback(id, gen);
+        return;
+    }
     sh->reopens++;
 }
 
@@ -951,6 +1152,7 @@ void CoreAudioOutput::Impl::handleEvent(Event ev)
 {
     std::shared_ptr<Dev> d;
     bool wasRunning, follow, want;
+    uint64_t gen;
     {
         std::lock_guard<std::mutex> g(mtx);
         if (dying)
@@ -959,6 +1161,7 @@ void CoreAudioOutput::Impl::handleEvent(Event ev)
         wasRunning = running;
         follow = following;
         want = wantOpen;
+        gen = openGen;
     }
     if (!want)
         return;
@@ -966,40 +1169,94 @@ void CoreAudioOutput::Impl::handleEvent(Event ev)
     {
         case Event::DeviceDead:
             if (d && !alive(d->id))
-                fallback(d->id);
+                fallback(d->id, gen);
             break;
         case Event::RateChanged:
-            if (d && std::fabs(nominalRate(d->id) - d->rate) >= 0.5)
-                reopenSame();
+            if (d && !d->fake && std::fabs(rateOf(d->id) - d->rate) >= 0.5)
+                reopenSame(gen);
             break;
         case Event::DefaultChanged:
-            if (!d && want)
-                fallback(kAudioObjectUnknown);
-            else if (d && follow && defaultDev() != d->id && defaultDev() != kAudioObjectUnknown)
-                fallback(kAudioObjectUnknown);
+            if (!d)
+                fallback(kAudioObjectUnknown, gen);
+            else if (follow && defaultDev() != d->id && defaultDev() != kAudioObjectUnknown)
+                fallback(kAudioObjectUnknown, gen);
             break;
         case Event::DevicesChanged:
             if (!d)
-                fallback(kAudioObjectUnknown);
+                fallback(kAudioObjectUnknown, gen);
             else
             {
                 // An unplug often removes the device without a DeviceIsAlive notification.
-                bool present = false;
-                for (auto& i : CoreAudioOutput::listOutputDevices())
-                    present |= i.id == d->id;
-                if (!alive(d->id) || !present)
-                    fallback(d->id);
+                if (!alive(d->id) || (!d->fake && !present(d->id)))
+                    fallback(d->id, gen);
             }
             break;
         case Event::OpenFailed:
-            fallback(kAudioObjectUnknown);
+            fallback(kAudioObjectUnknown, gen);
             break;
         case Event::Watchdog:
-            if (d && wasRunning && d->started.load() &&
-                nowNs() - sh->lastCycleNs.load() > kStallNs)
-                fallback(d->id);
+            if (d && !d->fake && wasRunning && d->started.load() && nowNs() - sh->lastCycleNs.load() > kStallNs)
+                fallback(d->id, gen);
             break;
     }
+}
+
+bool CoreAudioOutput::Impl::cmdOpen(AudioDeviceID id, uint8_t l, uint8_t r, uint64_t gen)
+{
+    if (stale(gen)) // a newer open() superseded this one
+        return false;
+    teardownCur();
+    if (stale(gen))
+        return false;
+    if (!sysListening)
+    {
+        sysListening = true; // set before the call: a hang is not retried
+        runTimed([this] { addSystemListeners(); });
+    }
+    Err err;
+    auto d = tryOpen(id, l, r, true, err);
+    if (stale(gen))
+    {
+        discard(d);
+        return false;
+    }
+    if (d)
+    {
+        if (!install(d, id == defaultDev()))
+        {
+            discard(d);
+            return false;
+        }
+        postStatus(Status::Opened, d->name);
+        return true;
+    }
+    if (err == Err::BadChannels)
+        return false; // caller error: no fallback
+    fallback(kAudioObjectUnknown, gen);
+    return false;
+}
+
+bool CoreAudioOutput::Impl::cmdSync()
+{
+    std::shared_ptr<Dev> d;
+    uint64_t gen;
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        d = cur;
+        gen = openGen;
+    }
+    if (!d)
+        return false;
+    if (syncRunState())
+        return true;
+    fallback(d->id, gen); // a start/stop that failed or hung: the device is dead
+    return false;
+}
+
+void CoreAudioOutput::Impl::cmdShutdown()
+{
+    teardownCur();
+    runTimed([this] { removeSystemListeners(); });
 }
 
 // ---- public API -----------------------------------------------------------------------------
@@ -1015,27 +1272,23 @@ CoreAudioOutput::~CoreAudioOutput()
     std::shared_ptr<Dev> d;
     {
         std::lock_guard<std::mutex> g(i.mtx);
-        i.dying = true; // handlers and the watchdog stop acting
-        d = i.cur;
-        i.cur.reset();
+        i.dying = true; // fences install()/status/handlers: nothing new starts after this
+        i.onStatus = nullptr;
         i.running = false;
+        i.wantOpen = false;
+        d = i.cur;
     }
+    if (d)
+        d->rt.store(nullptr); // the IOProc goes silent now, whatever happens to the teardown
     if (i.timer)
         dispatch_source_cancel(i.timer);
-    const bool ok = i.runTimed(
-      [&i, d]
-      {
-          if (d)
-              d->teardown();
-          i.removeSystemListeners();
-      });
-    if (d)
-        d->rt.store(nullptr); // an IOProc that is still alive (wedged teardown) goes silent
-    if (!ok)
-    {
-        // A HAL call is wedged on the worker. Do not wait for it at quit: the wedged task keeps
-        // the Impl, the Dev and its thread alive (a deliberate leak) and nothing else blocks.
-    }
+    // Fence: the shutdown command runs after whatever the control queue is doing (which stands
+    // down at its next step because `dying` is set). Wait for it at most 2 s.
+    const bool ok = i.runCmd([&i] { i.cmdShutdown(); return true; }, kOpTimeout, true);
+    i.sh->cycleEnabled = false; // an abandoned device's IOProc may still run: it must not call onCycle
+    (void)ok;
+    // else: a HAL call is wedged (or the queue is slow). Do not wait for it at quit: the queued
+    // work only touches the Impl, which stays alive until it is done (a deliberate leak if wedged).
 }
 
 void CoreAudioOutput::setOnCycle(std::function<void(uint64_t, uint64_t, size_t)> fn)
@@ -1052,28 +1305,17 @@ void CoreAudioOutput::setOnStatus(std::function<void(Status, std::string)> fn)
 bool CoreAudioOutput::open(AudioDeviceID id, uint8_t leftCh, uint8_t rightCh)
 {
     Impl& i = *impl_;
+    uint64_t gen;
     {
+        // Intent first: it stands even if the wait below expires.
         std::lock_guard<std::mutex> g(i.mtx);
+        if (i.dying)
+            return false;
         i.running = false;
         i.wantOpen = true;
+        gen = ++i.openGen;
     }
-    i.teardownCur();
-    {
-        // System listeners go on the worker too (they are HAL calls).
-        i.runTimed([&i] { i.addSystemListeners(); });
-    }
-    Impl::Err err;
-    auto d = i.tryOpen(id, leftCh, rightCh, true, err);
-    if (d)
-    {
-        i.install(d, id == defaultOutputDevice());
-        i.postStatus(Status::Opened, d->name);
-        return true;
-    }
-    if (err == Impl::Err::BadChannels)
-        return false; // caller error: no fallback
-    i.postEvent(Event::OpenFailed);
-    return false;
+    return i.runCmd([&i, id, leftCh, rightCh, gen] { return i.cmdOpen(id, leftCh, rightCh, gen); });
 }
 
 bool CoreAudioOutput::start()
@@ -1081,11 +1323,11 @@ bool CoreAudioOutput::start()
     Impl& i = *impl_;
     {
         std::lock_guard<std::mutex> g(i.mtx);
-        if (!i.cur)
+        if (i.dying || !i.cur)
             return false;
         i.running = true;
     }
-    i.syncRunState();
+    i.runCmd([&i] { return i.cmdSync(); });
     return isRunning();
 }
 
@@ -1094,9 +1336,11 @@ void CoreAudioOutput::stop()
     Impl& i = *impl_;
     {
         std::lock_guard<std::mutex> g(i.mtx);
+        if (i.dying)
+            return;
         i.running = false;
     }
-    i.syncRunState();
+    i.runCmd([&i] { return i.cmdSync(); });
 }
 
 bool CoreAudioOutput::isOpen() const

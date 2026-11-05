@@ -19,6 +19,12 @@
 // rather than waited on, so the app keeps running and can quit. The destructor never blocks
 // longer than 2 s for the same reason (a wedged worker is a deliberate leak).
 //
+// SERIALISATION. All control work (open, start, stop, fallback, events) runs on one internal
+// serial queue. open()/start()/stop() record their intent, enqueue a command and wait for it
+// with ONE overall deadline of 2.5 s; on the deadline they return false but the command still
+// completes later and reports through onStatus. Do not call these from the onStatus callback.
+// After the destructor returns, no callback (onStatus) fires and the AudioRuntime is not used.
+//
 // FALLBACK. If the device dies (DeviceIsAlive, vanishes from the device list, or the IOProc
 // stalls for 1 s while running), or an open fails or times out, the output moves to the system
 // default output, then to the built-in output device, restarting if it was running. This runs
@@ -56,7 +62,8 @@ class CoreAudioOutput
         Failed    // no device could be opened (name empty); retried on the next device change
     };
 
-    // All devices with at least one output channel.
+    // All devices with at least one output channel. Reads every device's properties, so it can
+    // block on a hung third-party driver: call it off the UI thread.
     static std::vector<DeviceInfo> listOutputDevices();
     static AudioDeviceID defaultOutputDevice(); // kAudioObjectUnknown when there is none
     // First built-in output device (transport type built-in), kAudioObjectUnknown if none.
@@ -129,6 +136,9 @@ struct CoreAudioOutputTestHooks
     std::function<AudioDeviceID()> defaultDevice;  // replaces the system default lookup
     std::function<AudioDeviceID()> builtinDevice;  // replaces the built-in lookup
     std::function<void(AudioDeviceID)> beforeTeardown; // first thing in a device's close; may block forever
+    std::function<void(AudioDeviceID)> beforeStart;    // before AudioOutputUnitStart; may block forever
+    std::function<bool(AudioDeviceID)> fakeOpen;       // true: build a HAL-less fake device for this id
+    std::function<void(void*)> workgroupSink;          // replaces AudioRuntime::setWorkgroup
 };
 
 struct CoreAudioOutputTestAccess

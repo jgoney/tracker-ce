@@ -130,3 +130,182 @@ TEST_CASE("test_open_hang_returns_and_falls_back", "[coreaudio]")
     gate->cv.notify_all();
     REQUIRE(destroyMs < 2500);
 }
+
+namespace
+{
+constexpr AudioDeviceID kA = 0xEE000001, kX = 0xEE000002, kY = 0xEE000003, kD = 0xEE000004, kB = 0xEE000005;
+
+struct Fixture
+{
+    FakeTracker fake;
+    AudioRuntime rt{ &fake, nullptr };
+    std::mutex m;
+    std::vector<std::pair<Status, std::string>> statuses;
+    std::vector<AudioDeviceID> attempts;
+    std::atomic<int> sinkCalls{ 0 };
+    std::atomic<bool> killedA{ false };
+    CoreAudioOutputTestHooks hooks;
+
+    Fixture()
+    {
+        hooks.fakeOpen = [](AudioDeviceID id) { return id >= kA && id <= kB; };
+        hooks.defaultDevice = [] { return kD; };
+        hooks.builtinDevice = [] { return kB; };
+        hooks.alive = [this](AudioDeviceID id) { return !(killedA && id == kA); };
+        hooks.workgroupSink = [this](void*) { sinkCalls++; };
+    }
+    void attach(CoreAudioOutput& o)
+    {
+        o.setOnStatus([this](Status s, std::string n)
+        {
+            std::lock_guard<std::mutex> g(m);
+            statuses.emplace_back(s, n);
+        });
+        CoreAudioOutputTestAccess::setHooks(o, hooks);
+    }
+    void note(AudioDeviceID id)
+    {
+        std::lock_guard<std::mutex> g(m);
+        attempts.push_back(id);
+    }
+    size_t statusCount()
+    {
+        std::lock_guard<std::mutex> g(m);
+        return statuses.size();
+    }
+    Status lastStatus()
+    {
+        std::lock_guard<std::mutex> g(m);
+        return statuses.back().first;
+    }
+    bool attempted(AudioDeviceID id)
+    {
+        std::lock_guard<std::mutex> g(m);
+        return std::count(attempts.begin(), attempts.end(), id) != 0;
+    }
+};
+
+double msSince(std::chrono::steady_clock::time_point t)
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+void blockUntil(const std::shared_ptr<std::atomic<bool>>& release)
+{
+    while (!release->load())
+        std::this_thread::sleep_for(5ms);
+}
+} // namespace
+
+// A wedged previous device AND a hanging new device: still one 2.5 s bound for the call.
+TEST_CASE("test_open_with_wedged_previous_and_hanging_new_returns_in_bound", "[coreaudio]")
+{
+    Fixture f;
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    f.hooks.beforeTeardown = [release](AudioDeviceID id) { if (id == kA) blockUntil(release); };
+    f.hooks.beforeOpen = [&f, release](AudioDeviceID id)
+    {
+        f.note(id);
+        if (id == kX)
+            blockUntil(release);
+    };
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(!out->open(kX)); // teardown of A (2 s) + open of X (2 s) would be 4 s
+    const double ms = msSince(t0);
+    REQUIRE(ms > 2300);
+    REQUIRE(ms < 2800);
+
+    // The command completes later: both devices were wedged, so the fallback lands on D.
+    const size_t n = f.statusCount();
+    REQUIRE(waitUntil([&] { return f.statusCount() > n && out->deviceId() == kD; }, 8000ms));
+    REQUIRE(f.lastStatus() == Status::FellBack);
+    REQUIRE(CoreAudioOutputTestAccess::isUnresponsive(*out, kA));
+    REQUIRE(CoreAudioOutputTestAccess::isUnresponsive(*out, kX));
+    REQUIRE(!CoreAudioOutputTestAccess::isUnresponsive(*out, kD));
+    const auto t1 = std::chrono::steady_clock::now();
+    out.reset();
+    REQUIRE(msSince(t1) < 2500);
+    release->store(true);
+}
+
+// open(Y) while a fallback is in flight: the user's choice wins, and Y is not blamed.
+TEST_CASE("test_open_during_fallback_user_choice_wins", "[coreaudio]")
+{
+    Fixture f;
+    f.hooks.beforeOpen = [&f](AudioDeviceID id)
+    {
+        f.note(id);
+        if (id == kD)
+            std::this_thread::sleep_for(1500ms); // a slow (but not hung) default device
+    };
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+    REQUIRE(out->start());
+    REQUIRE(out->isRunning());
+
+    f.killedA = true;
+    CoreAudioOutputTestAccess::postDeviceDead(*out); // fallback begins: opens D (1.5 s)
+    REQUIRE(waitUntil([&] { return f.attempted(kD); }, 2000ms));
+    REQUIRE(out->open(kY)); // queued behind the fallback; returns within 2.5 s
+    REQUIRE(out->deviceId() == kY);
+    REQUIRE(!CoreAudioOutputTestAccess::isUnresponsive(*out, kY));
+    REQUIRE(!CoreAudioOutputTestAccess::isUnresponsive(*out, kD));
+    std::this_thread::sleep_for(300ms); // nothing replaces Y afterwards
+    REQUIRE(out->deviceId() == kY);
+    REQUIRE(f.lastStatus() == Status::Opened);
+}
+
+// Destroying the output while a fallback is in flight: nothing runs after the destructor returns.
+TEST_CASE("test_destructor_during_fallback_runs_nothing_afterwards", "[coreaudio]")
+{
+    Fixture f;
+    f.hooks.beforeOpen = [&f](AudioDeviceID id)
+    {
+        f.note(id);
+        if (id == kD)
+            std::this_thread::sleep_for(3000ms); // longer than the 2 s op bound
+    };
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+    REQUIRE(waitUntil([&] { return f.statusCount() >= 1; }, 1000ms));
+    const int sinkAfterOpen = f.sinkCalls.load();
+    REQUIRE(sinkAfterOpen == 1);
+
+    f.killedA = true;
+    CoreAudioOutputTestAccess::postDeviceDead(*out);
+    REQUIRE(waitUntil([&] { return f.attempted(kD); }, 2000ms));
+    const auto t0 = std::chrono::steady_clock::now();
+    out.reset(); // mid-fallback
+    REQUIRE(msSince(t0) < 2500);
+    const size_t statusAtReturn = f.statusCount();
+    const int sinkAtReturn = f.sinkCalls.load();
+    std::this_thread::sleep_for(4000ms); // the abandoned work finishes in the background
+    REQUIRE(f.statusCount() == statusAtReturn); // no onStatus after destruction
+    REQUIRE(f.sinkCalls.load() == sinkAtReturn); // no setWorkgroup after destruction
+    REQUIRE(!f.attempted(kB));                   // the fallback chain stood down
+}
+
+// A start that hangs is a dead device: fall back, and say so.
+TEST_CASE("test_start_hang_falls_back_with_status", "[coreaudio]")
+{
+    Fixture f;
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    f.hooks.beforeStart = [release](AudioDeviceID id) { if (id == kA) blockUntil(release); };
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+    const size_t n = f.statusCount();
+    out->start(); // A's start wedges; the call returns by its deadline
+    REQUIRE(waitUntil([&] { return f.statusCount() > n && f.lastStatus() == Status::FellBack; }, 6000ms));
+    REQUIRE(CoreAudioOutputTestAccess::isUnresponsive(*out, kA));
+    REQUIRE(out->deviceId() == kD);
+    REQUIRE(out->isRunning()); // the run intent carried over to the new device
+    out.reset();
+    release->store(true);
+}
