@@ -98,3 +98,22 @@ target_compile_options(synth_stub_tests PRIVATE -std=gnu++20 "SHELL:-include cst
 target_link_libraries(synth_stub_tests PRIVATE PolySynthStub TrackerCore catch2_vendored)
 # test_link_stubs.cpp: TEMPORARY platform-symbol stand-ins until Task 4 (HAL) lands.
 target_sources(synth_stub_tests PRIVATE tests/test_link_stubs.cpp)
+
+# --- Apple HAL (POSIX FileSystem + virtual sector map; Task 4 adds the rest of PlatformApple) ---
+add_library(TrackerApple STATIC
+    hal/FileSystemPosix.cpp
+    hal/VirtualSectorMap.cpp)
+target_include_directories(TrackerApple PUBLIC hal)
+target_link_libraries(TrackerApple PUBLIC TrackerCore)
+target_compile_options(TrackerApple PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
+
+add_executable(filesystem_tests tests/test_filesystem.cpp)
+target_compile_options(filesystem_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(filesystem_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# --- ctest ---
+enable_testing()
+add_test(NAME dsp_tests COMMAND dsp_tests)
+add_test(NAME synth_stub_tests COMMAND synth_stub_tests)
+add_test(NAME filesystem_tests COMMAND filesystem_tests)
