@@ -1,6 +1,7 @@
 #include "InputApple.h"
 
-using Clock = std::chrono::steady_clock;
+#include <chrono>
+
 
 bool SwitchGroupApple::isButtonPressed(int idx)
 {
@@ -17,11 +18,13 @@ void SwitchGroupApple::setActionCallback(ActionType action, void (*callback)(uin
     }
 }
 
-void SwitchGroupApple::press(uint8_t idx, Clock::time_point now)
+constexpr uint16_t SwitchGroupApple::kHoldTimeStepDiff[];
+
+void SwitchGroupApple::press(uint8_t idx, uint32_t now)
 {
     if (idx >= count_ || state_[idx].down)
         return;
-    state_[idx] = { true, false, now };
+    state_[idx] = { true, 0, now };
     if (onPress_)
         onPress_(idx);
 }
@@ -35,15 +38,19 @@ void SwitchGroupApple::release(uint8_t idx)
         onRelease_(idx);
 }
 
-void SwitchGroupApple::updateHolds(Clock::time_point now)
+void SwitchGroupApple::updateHolds(uint32_t now)
 {
     for (int i = 0; i < count_; i++)
     {
         State& s = state_[i];
-        if (s.down && !s.holdFired &&
-            now - s.since >= std::chrono::milliseconds(holdTimeMs_))
+        // Keys.cpp:203-214: fire when elapsed > holdTime - step diff, then advance the step
+        // (clamped) and restart the interval, so a held key repeats faster and faster.
+        if (s.down && (uint32_t)(now - s.holdTimeMs) >
+                        (uint32_t)(holdTimeMs_ - kHoldTimeStepDiff[s.holdFactor]))
         {
-            s.holdFired = true;
+            if (s.holdFactor < kHoldStepsCount - 1)
+                s.holdFactor++;
+            s.holdTimeMs = now;
             if (onHold_)
                 onHold_((uint8_t)i);
         }
@@ -58,12 +65,18 @@ void InputApple::post(InputEvent e)
 
 void InputApple::dispatch()
 {
+    dispatchAt((uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now().time_since_epoch())
+                 .count());
+}
+
+void InputApple::dispatchAt(uint32_t now)
+{
     std::vector<InputEvent> events;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         events.swap(queue_);
     }
-    const auto now = Clock::now();
     for (const InputEvent& e : events)
     {
         switch (e.kind)

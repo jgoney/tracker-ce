@@ -134,24 +134,39 @@ void onHold(uint8_t n)
 }
 } // namespace
 
-TEST_CASE("buttons hold synthesizes after the hold time")
+TEST_CASE("held key auto-repeats on the IMX schedule")
 {
+    // platforms/imx/source/Drivers/Keys.cpp:10,202-214: fire when elapsed > holdTime - diff[f],
+    // diff = {0,100,190,235,255,270}, f saturates at 5, interval restarts at each fire.
     InputApple in;
-    in.buttons().setHoldTime(20);
+    in.buttons().setHoldTime(333);
     in.buttons().setActionCallback(SwitchGroup::kHold, onHold);
+    gHolds = 0;
     in.post({ InputEvent::Button, 43, true, 0 });
-    in.dispatch();
+    in.dispatchAt(1000); // press at t=1000
     REQUIRE(gHolds == 0);
-    usleep(40 * 1000);
-    in.dispatch();
-    REQUIRE(gHolds == 1);
+
+    // expected fire times: intervals (strictly greater than) 333, 233, 143, 98, 78, 63, 63...
+    const int intervals[] = { 333, 233, 143, 98, 78, 63, 63, 63 };
+    uint32_t t = 1000;
+    for (int iv : intervals)
+    {
+        in.dispatchAt(t + iv); // exactly the interval: not yet (needs >)
+        int before = gHolds;
+        in.dispatchAt(t + iv + 1);
+        REQUIRE(gHolds == before + 1);
+        t += iv + 1;
+        in.dispatchAt(t); // same instant: no double fire
+        REQUIRE(gHolds == before + 1);
+    }
     REQUIRE(gHoldIdx == 43);
-    usleep(40 * 1000);
-    in.dispatch();
-    REQUIRE(gHolds == 1); // only once per press
+
     in.post({ InputEvent::Button, 43, false, 0 });
-    in.dispatch();
+    in.dispatchAt(t + 1);
     REQUIRE_FALSE(in.buttons().isButtonPressed(43));
+    int total = gHolds;
+    in.dispatchAt(t + 1000);
+    REQUIRE(gHolds == total); // released: no more repeats
 }
 
 TEST_CASE("timer basics")
@@ -223,6 +238,21 @@ TEST_CASE("test_synth_project_roundtrip_identical")
         newFileManager.getSynth()->setPatchDirty(part);
     }
 
+    // Assign each synth instrument (core instrument numbering: SYNTH_INSTRUMENTS_START_IDX + part)
+    // to a note on its own track, and give each part distinct settings, via the core's own
+    // structures, then flag the pattern and project as changed so the save writes them.
+    auto* pattern = sequencer.getActualPattern();
+    for (int part = 0; part < kSynthParts; part++)
+    {
+        auto& step = pattern->track[part].step[0];
+        step.note = 60 + part;
+        step.instrument = SYNTH_INSTRUMENTS_START_IDX + part;
+        mtProject.values.synthPart[part].gainDb = -3 - part;
+        mtProject.values.synthPart[part].voiceCount = 1 + part % 2;
+    }
+    newFileManager.setActualPatternStructChanged();
+    newFileManager.setProjectStructChanged();
+
     char path[] = "Projects";
     char name1[] = "rt1";
     REQUIRE(newFileManager.saveProject(path, name1));
@@ -234,8 +264,21 @@ TEST_CASE("test_synth_project_roundtrip_identical")
     REQUIRE(pumpUntilIdle(5000));
     newFileManager.clearStatus();
 
+    // the reloaded project still has the synth instruments assigned and configured
+    {
+        auto* reloaded = sequencer.getActualPattern();
+        for (int part = 0; part < kSynthParts; part++)
+        {
+            REQUIRE(reloaded->track[part].step[0].instrument == SYNTH_INSTRUMENTS_START_IDX + part);
+            REQUIRE(reloaded->track[part].step[0].note == 60 + part);
+            REQUIRE(mtProject.values.synthPart[part].gainDb == -3 - part);
+        }
+    }
+
     const auto proj1 = slurp(root + "/Projects/rt1/project.mt");
+    const auto patt1 = slurp(root + "/Projects/rt1/patterns/pattern_01.mtp");
     REQUIRE(proj1.size() == sizeof(strProjectFile));
+    REQUIRE(patt1.size() > 0);
 
     // Re-save the re-opened project under the same name (incremental save).
     REQUIRE(newFileManager.saveProject(path, name1));
@@ -246,19 +289,10 @@ TEST_CASE("test_synth_project_roundtrip_identical")
     const auto proj2 = slurp(root + "/Projects/rt1/project.mt");
     REQUIRE(proj2.size() == proj1.size());
 
-    // Everything up to projectName (header, song, values) must be byte-identical. projectName
-    // and projectPath are strcpy'd into an uninitialized stack buffer by the core (hardware
-    // does the same), so only their string content is deterministic; the trailing crc is 0.
-    strProjectFile probe;
-    const size_t nameOff = (const char*)probe.projectDataAndHeader.project.projectName -
-                           (const char*)&probe;
-    const size_t pathOff = (const char*)probe.projectDataAndHeader.project.projectPath -
-                           (const char*)&probe;
-    REQUIRE(nameOff > 1000);
-    REQUIRE(std::memcmp(proj1.data(), proj2.data(), nameOff) == 0);
-    REQUIRE(std::strcmp((const char*)&proj1[nameOff], (const char*)&proj2[nameOff]) == 0);
-    REQUIRE(std::strcmp((const char*)&proj1[pathOff], (const char*)&proj2[pathOff]) == 0);
-    REQUIRE(std::strcmp((const char*)&proj1[nameOff], "rt1") == 0);
+    // The whole file, crc included, is byte-identical (the buffer is zero-initialised, so the
+    // tails of projectName/projectPath are deterministic).
+    REQUIRE(proj1 == proj2);
+    REQUIRE(slurp(root + "/Projects/rt1/patterns/pattern_01.mtp") == patt1);
 
     for (int part = 0; part < kSynthParts; part++)
     {

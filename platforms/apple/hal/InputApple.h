@@ -31,22 +31,26 @@ class SwitchGroupApple : public SwitchGroup
     bool isButtonPressed(int idx) override;
     void setActionCallback(ActionType action, void (*callback)(uint8_t)) override;
 
-    void press(uint8_t idx, std::chrono::steady_clock::time_point now);
+    void press(uint8_t idx, uint32_t nowMs);
     void release(uint8_t idx);
-    void updateHolds(std::chrono::steady_clock::time_point now);
+    // Auto-repeat like the IMX Keys driver (platforms/imx/source/Drivers/Keys.cpp:202-214).
+    void updateHolds(uint32_t nowMs);
 
   private:
     struct State
     {
         bool down = false;
-        bool holdFired = false;
-        std::chrono::steady_clock::time_point since;
+        uint8_t holdFactor = 0; // index into kHoldTimeStepDiff
+        uint32_t holdTimeMs = 0; // last press / last hold event
     };
     std::array<State, kMaxSwitches> state_{};
     void (*onPress_)(uint8_t) = nullptr;
     void (*onRelease_)(uint8_t) = nullptr;
     void (*onHold_)(uint8_t) = nullptr;
-    int holdTimeMs_ = 500;
+    // Keys.cpp:10 holdTimeStepDiff; Keys.h:98 default holdTime 333 ms.
+    static constexpr int kHoldStepsCount = 6;
+    static constexpr uint16_t kHoldTimeStepDiff[kHoldStepsCount] = { 0, 100, 190, 235, 255, 270 };
+    int holdTimeMs_ = 333;
     int count_;
 };
 
@@ -80,6 +84,8 @@ class InputApple
     void post(InputEvent e);
     // Tracker thread, once per loop: fires callbacks and synthesizes holds.
     void dispatch();
+    // Same, with an explicit millisecond clock (tests).
+    void dispatchAt(uint32_t nowMs);
 
   private:
     std::mutex mutex_;
