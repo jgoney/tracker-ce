@@ -24,9 +24,16 @@
 //
 // This will place the 1024 byte buffer into the RAM1
 //
+#if defined(PLATFORM_APPLE)
+// Mach-O rejects ELF-style section names; use default sections on the host.
+#define __SECTION_EXT(type, bank, name)
+#define __SECTION(type, bank)
+#define __SECTION_SIMPLE(type)
+#else
 #define __SECTION_EXT(type, bank, name) __attribute__ ((section("." #type ".$" #bank "." #name)))
 #define __SECTION(type, bank) __attribute__ ((section("." #type ".$" #bank)))
 #define __SECTION_SIMPLE(type) __attribute__ ((section("." #type)))
+#endif
 
 #define __DATA_EXT(bank, name) __SECTION_EXT(data, bank, name)
 #define __DATA(bank) __SECTION(data, bank)
@@ -36,12 +43,22 @@
 
 // Macros for placing text (code), data, or bss into a section that is automatically
 // placed after the vectors in the target image.
+#if defined(PLATFORM_APPLE)
+#define __AFTER_VECTORS_EXT(name)
+#define __AFTER_VECTORS
+#else
 #define __AFTER_VECTORS_EXT(name) __attribute__ ((section(".after_vectors.$" #name)))
 #define __AFTER_VECTORS __attribute__ ((section(".after_vectors")))
+#endif
 
 // Macros for causing functions to be relocated to RAM
+#if defined(PLATFORM_APPLE)
+#define __RAM_FUNC_EXT(name)
+#define __RAM_FUNC
+#else
 #define __RAM_FUNC_EXT(name) __attribute__ ((section(".ramfunc.$" #name)))
 #define __RAM_FUNC __attribute__ ((section(".ramfunc")))
+#endif
 
 // Macros to be used in preference to __RAM_FUNC to better match __DATA behaviour
 #define __RAMFUNC_EXT(bank, name) __SECTION_EXT(ramfunc, bank, name)
