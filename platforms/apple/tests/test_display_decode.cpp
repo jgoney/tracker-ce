@@ -854,3 +854,45 @@ TEST_CASE("a scissored clear overwrites drawn pixels even with clear alpha 0")
     REQUIRE(px(rgb, 50, 50) == 0xFFFFFF);
     REQUIRE(px(rgb, 15, 15) == 0x0000FF); // (ONE, ZERO) writes the clear colour, alpha 0 included
 }
+
+TEST_CASE("swap snapshots the ram_g pages bitmaps read; blocks are shared while unchanged")
+{
+    Chip c;
+    std::vector<uint8_t> img(64, 0x11); // 8x8 L8 at 30000 (page 7)
+    c.m.writeDataRAMG(img.data(), 64, 30000);
+    const std::initializer_list<uint32_t> list = {
+        BITMAP_HANDLE(2), BITMAP_SOURCE(30000), uint32_t(BITMAP_LAYOUT(L8, 8, 8)),
+        uint32_t(BITMAP_SIZE(NEAREST, BORDER, BORDER, 8, 8)), BEGIN(BITMAPS),
+        VERTEX2II(10, 10, 2, 0), END(), FT_DISPLAY()
+    };
+    auto f1 = c.frame(list);
+    REQUIRE(f1);
+    REQUIRE(f1->ramG.size() == 1);
+    REQUIRE(f1->ramG[0].addr == 28672); // whole 4 KB page
+    REQUIRE(f1->ramG[0].bytes->size() == 4096);
+    uint32_t gen1 = 0;
+    const uint8_t* b1 = f1->ramGBytes(30000, 64, &gen1);
+    REQUIRE(b1);
+    REQUIRE(b1[0] == 0x11);
+    REQUIRE(gen1 == c.m.ramGGeneration(30000, 64));
+    REQUIRE(f1->ramGBytes(40000, 4) == nullptr);
+
+    // an unrelated write elsewhere: the next frame shares the same copy
+    c.m.writeDataRAMG(img.data(), 4, 100000);
+    auto f2 = c.frame(list);
+    REQUIRE(f2->ramG[0].bytes == f1->ramG[0].bytes);
+
+    // writing the bitmap does not touch the published frame; the next frame gets a new copy
+    std::vector<uint8_t> img2(64, 0x22);
+    c.m.writeDataRAMG(img2.data(), 64, 30000);
+    REQUIRE(f1->ramGBytes(30000, 64)[0] == 0x11);
+    auto f3 = c.frame(list);
+    uint32_t gen3 = 0;
+    REQUIRE(f3->ramGBytes(30000, 64, &gen3)[0] == 0x22);
+    REQUIRE(gen3 != gen1);
+
+    // frames without bitmaps carry nothing
+    auto f4 = c.frame({ BEGIN(RECTS), VERTEX2II(0, 0, 0, 0), VERTEX2II(4, 4, 0, 0), END(),
+                        FT_DISPLAY() });
+    REQUIRE(f4->ramG.empty());
+}

@@ -62,7 +62,8 @@ class Ft812Model : public DisplayDriver
     int brightness() const { return brightness_; }
     int rotation() const { return rotation_; }
 
-    // Last frame published by CMD_SWAP (nullptr before the first). Safe from any thread.
+    // Last frame published by CMD_SWAP (nullptr before the first). Safe from any thread: the frame
+    // is immutable and carries its own copy of the RAM_G bytes its bitmaps read (Frame::ramG).
     std::shared_ptr<const Frame> latestFrame() const;
 
     // Changes whenever any byte in [addr, addr+len) of RAM_G may have changed (texture caching).
@@ -90,6 +91,8 @@ class Ft812Model : public DisplayDriver
 
   private:
     void flushPending();
+    // Copies the RAM_G pages the frame's bitmap prims read into frame.ramG (see Frame.h).
+    void snapshotRamG(Frame& frame);
 
     static constexpr uint32_t kPageShift = 12; // 4 KB generation pages
     static constexpr uint32_t kPages = kRamGSize >> kPageShift;
@@ -102,6 +105,7 @@ class Ft812Model : public DisplayDriver
     DlDecoder dl_;
     uint64_t frameSerial_ = 0;
     std::shared_ptr<const Frame> latest_;
+    std::vector<RamGBlock> ramGBlocks_; // the last frame's blocks, reused while unchanged
     std::unique_ptr<std::atomic<uint32_t>[]> pageGen_;
     std::atomic<uint32_t> writeStamp_{ 0 };
 

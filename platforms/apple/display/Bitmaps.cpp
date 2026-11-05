@@ -133,3 +133,13 @@ std::vector<uint32_t> Bitmaps::decode(uint32_t fmt,
     }
     return out;
 }
+
+bool Bitmaps::cellRange(const Prim& p, uint32_t& addr, uint32_t& bytes)
+{
+    constexpr uint64_t kRamGSize = 1024 * 1024;
+    if (layoutWidth(p.fmt, p.stride) == 0 || p.layoutH == 0)
+        return false;
+    bytes = p.stride * p.layoutH;
+    addr = (p.srcAddr + p.cell * bytes) & 0x3FFFFF;
+    return uint64_t(addr) + bytes <= kRamGSize;
+}

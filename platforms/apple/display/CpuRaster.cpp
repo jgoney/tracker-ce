@@ -183,13 +183,8 @@ using TexelCache = std::map<TexelKey, std::vector<uint32_t>>;
 void drawBitmap(Canvas& cv, const Prim& p, const Ft812Model& model, TexelCache& cache)
 {
     const uint32_t lw = Bitmaps::layoutWidth(p.fmt, p.stride), lh = p.layoutH;
-    if (lw == 0 || lh == 0)
-        return;
-    // Cell n starts n * stride * height bytes after the source; 22-bit address arithmetic
-    // (CMD_SETFONT2 sources point before the first glyph).
-    const uint32_t cellBytes = p.stride * lh;
-    const uint32_t addr = (p.srcAddr + p.cell * cellBytes) & 0x3FFFFF;
-    if (uint64_t(addr) + cellBytes > Ft812Model::kRamGSize)
+    uint32_t addr = 0, cellBytes = 0;
+    if (!Bitmaps::cellRange(p, addr, cellBytes))
         return;
     const uint32_t palBytes = Bitmaps::paletteBytes(p.fmt);
     const bool palOk = palBytes && uint64_t(p.paletteAddr) + palBytes <= Ft812Model::kRamGSize;

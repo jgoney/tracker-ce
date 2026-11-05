@@ -4,8 +4,15 @@
 #include <cstdint>
 #include <vector>
 
+struct Prim;
+
 namespace Bitmaps
 {
+// RAM_G range [addr, addr + bytes) holding the texels of a Bitmap prim's cell: cell n starts
+// n * stride * height bytes after the source, 22-bit wrapped (CMD_SETFONT2 sources point before
+// the first glyph). False if the layout is empty or the range leaves RAM_G (nothing is drawn).
+bool cellRange(const Prim& p, uint32_t& addr, uint32_t& bytes);
+
 // Decodes a w x h bitmap of format `fmt` (FT81x.h: ARGB1555, L1, L2, L4, L8, RGB332, ARGB2, ARGB4,
 // RGB565, PALETTED565, PALETTED4444, PALETTED8) whose rows are `stride` bytes apart. `palette`
 // is the PALETTE_SOURCE memory for the paletted formats (nullptr reads as zeros). Luminance

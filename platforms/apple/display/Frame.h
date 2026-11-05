@@ -1,8 +1,11 @@
 #pragma once
 // One decoded FT812 display list: what the screen shows after a CMD_SWAP, as a list of
 // primitives in pixel space. Produced by DlDecoder, consumed by CpuRaster (reference) and the
-// Metal renderer. Bitmap texels stay in Ft812Model's RAM_G and are referenced by address.
+// Metal renderer. Bitmap prims reference texels by RAM_G address; the bytes they read are copied
+// into the Frame at CMD_SWAP (Frame::ramG), so a renderer on another thread never reads the live
+// RAM_G the tracker thread is writing.
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ft812
@@ -81,9 +84,43 @@ struct Prim
     float xform[6] = { 1, 0, 0, 0, 1, 0 };
 };
 
+// An immutable copy of whole 4 KB RAM_G pages [addr, addr + bytes->size()), taken on the tracker
+// thread at CMD_SWAP. pageGens[i] is Ft812Model::ramGGeneration of page i at that moment, so
+// (address range, generation) identifies the bytes exactly. Shared between frames while unchanged.
+struct RamGBlock
+{
+    uint32_t addr = 0;
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+    std::vector<uint32_t> pageGens;
+};
+
 struct Frame
 {
     uint32_t clearColor = 0x000000FF; // 0xRRGGBBAA
     std::vector<Prim> prims;
     uint64_t serial = 0;
+    // RAM_G bytes every Bitmap prim reads (cells and palettes), sorted by address, disjoint.
+    std::vector<RamGBlock> ramG;
+
+    // The snapshot of RAM_G [addr, addr + len), or nullptr if no block holds all of it. With
+    // `gen`, also the largest page generation of the range.
+    const uint8_t* ramGBytes(uint32_t addr, uint32_t len, uint32_t* gen = nullptr) const
+    {
+        for (const RamGBlock& b : ramG)
+        {
+            const uint64_t end = uint64_t(b.addr) + b.bytes->size();
+            if (addr < b.addr || uint64_t(addr) + len > end)
+                continue;
+            if (gen)
+            {
+                *gen = 0;
+                const uint32_t first = (addr - b.addr) >> 12;
+                const uint32_t last = len ? (addr + len - 1 - b.addr) >> 12 : first;
+                for (uint32_t p = first; p <= last && p < b.pageGens.size(); p++)
+                    *gen = *gen > b.pageGens[p] ? *gen : b.pageGens[p];
+            }
+            return b.bytes->data() + (addr - b.addr);
+        }
+        return nullptr;
+    }
 };

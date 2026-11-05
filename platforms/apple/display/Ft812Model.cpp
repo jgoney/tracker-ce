@@ -1,5 +1,7 @@
 #include "Ft812Model.h"
 
+#include "Bitmaps.h"
+
 #include <algorithm>
 #include <cstring>
 
@@ -184,6 +186,7 @@ void Ft812Model::swap()
     auto frame = std::make_shared<Frame>();
     frame->serial = ++frameSerial_;
     dl_.decode(ramDl_.data(), ramDl_.size(), *frame);
+    snapshotRamG(*frame);
     std::atomic_store_explicit(
       &latest_, std::shared_ptr<const Frame>(std::move(frame)), std::memory_order_release);
 }
@@ -191,4 +194,55 @@ void Ft812Model::swap()
 std::shared_ptr<const Frame> Ft812Model::latestFrame() const
 {
     return std::atomic_load_explicit(&latest_, std::memory_order_acquire);
+}
+
+void Ft812Model::snapshotRamG(Frame& frame)
+{
+    // Runs on the thread that writes RAM_G (CMD_SWAP), so bytes and generations are consistent.
+    // Whole pages are copied so the blocks stay the same from frame to frame (a font's block does
+    // not depend on which glyphs this frame draws) and are shared until a page changes.
+    std::vector<bool> need(kPages, false);
+    auto mark = [&](uint32_t addr, uint32_t len) {
+        if (len == 0 || uint64_t(addr) + len > kRamGSize)
+            return;
+        for (uint32_t p = addr >> kPageShift; p <= (addr + len - 1) >> kPageShift; p++)
+            need[p] = true;
+    };
+    for (const Prim& p : frame.prims)
+    {
+        if (p.kind != Prim::Bitmap)
+            continue;
+        uint32_t addr = 0, bytes = 0;
+        if (Bitmaps::cellRange(p, addr, bytes))
+            mark(addr, bytes);
+        mark(p.paletteAddr, Bitmaps::paletteBytes(p.fmt));
+    }
+
+    std::vector<RamGBlock> blocks;
+    for (uint32_t p = 0; p < kPages;)
+    {
+        if (!need[p])
+        {
+            p++;
+            continue;
+        }
+        uint32_t end = p;
+        while (end < kPages && need[end])
+            end++;
+        RamGBlock b;
+        b.addr = p << kPageShift;
+        for (uint32_t q = p; q < end; q++)
+            b.pageGens.push_back(pageGen_[q].load(std::memory_order_relaxed));
+        const size_t size = size_t(end - p) << kPageShift;
+        for (const RamGBlock& old : ramGBlocks_)
+            if (old.addr == b.addr && old.bytes->size() == size && old.pageGens == b.pageGens)
+                b.bytes = old.bytes;
+        if (!b.bytes)
+            b.bytes = std::make_shared<const std::vector<uint8_t>>(ramG_.begin() + b.addr,
+                                                                   ramG_.begin() + b.addr + size);
+        blocks.push_back(std::move(b));
+        p = end;
+    }
+    ramGBlocks_ = blocks;
+    frame.ramG = std::move(blocks);
 }
