@@ -51,6 +51,18 @@ class MidiCoreMidi : public UsbMidi, public UartMidi
     static std::vector<std::string> listDestinations();
     bool selectDestination(int idx);
 
+    // Stable identity of a destination: kMIDIPropertyUniqueID (0 = unknown) plus the display
+    // name. Indexes shift whenever a device comes or goes; identity does not.
+    struct DestinationInfo
+    {
+        int32_t uniqueId;
+        std::string name;
+    };
+    static std::vector<DestinationInfo> listDestinationInfos();
+    // Resolves against the live destination list at call time: by uniqueId (when non-zero),
+    // else by display name. Deselects and returns false when nothing matches.
+    bool selectDestinationByIdentity(int32_t uniqueId, const std::string& name);
+
     // User timing offset in ms, clamped to -50..+50.
     void setUserOffsetMs(int ms);
     int userOffsetMs() const;

@@ -373,6 +373,18 @@ TEST_CASE("CoreMIDI round trip: virtual destination and published source", "[mid
     REQUIRE_FALSE(midi.selectDestination((int)names.size() + 5));
     REQUIRE(midi.selectDestination(idx));
 
+    // Identity selection (unique id first, then name) is independent of list position.
+    {
+        auto infos = MidiCoreMidi::listDestinationInfos();
+        MidiCoreMidi::DestinationInfo mine = infos[(size_t)idx];
+        REQUIRE(mine.uniqueId != 0);
+        REQUIRE(midi.selectDestinationByIdentity(mine.uniqueId, "stale name"));
+        REQUIRE(midi.selectDestinationByIdentity(0, mine.name));
+        REQUIRE(midi.selectDestinationByIdentity(mine.uniqueId ^ 0x5a5a5a, mine.name)); // id gone: name
+        REQUIRE_FALSE(midi.selectDestinationByIdentity(mine.uniqueId ^ 0x5a5a5a, "no such")); // deselects
+        REQUIRE(midi.selectDestinationByIdentity(mine.uniqueId, mine.name));
+    }
+
     midi.sendNoteOn(64, 90, 3);
     const auto deadline = std::chrono::steady_clock::now() + 3000ms;
     auto have = [&](Rx& rx) {

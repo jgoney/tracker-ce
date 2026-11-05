@@ -336,6 +336,45 @@ std::vector<std::string> MidiCoreMidi::listDestinations()
     return names;
 }
 
+std::vector<MidiCoreMidi::DestinationInfo> MidiCoreMidi::listDestinationInfos()
+{
+    std::vector<DestinationInfo> out;
+    const ItemCount n = MIDIGetNumberOfDestinations();
+    for (ItemCount i = 0; i < n; i++)
+    {
+        const MIDIEndpointRef e = MIDIGetDestination(i);
+        CFStringRef s = nullptr;
+        MIDIObjectGetStringProperty(e, kMIDIPropertyDisplayName, &s);
+        SInt32 uid = 0;
+        MIDIObjectGetIntegerProperty(e, kMIDIPropertyUniqueID, &uid);
+        out.push_back({ (int32_t)uid, cfToString(s) });
+        if (s)
+            CFRelease(s);
+    }
+    return out;
+}
+
+bool MidiCoreMidi::selectDestinationByIdentity(int32_t uniqueId, const std::string& name)
+{
+    const auto infos = listDestinationInfos();
+    int found = -1;
+    if (uniqueId != 0)
+        for (size_t i = 0; i < infos.size() && found < 0; i++)
+            if (infos[i].uniqueId == uniqueId)
+                found = (int)i;
+    if (found < 0 && !name.empty())
+        for (size_t i = 0; i < infos.size() && found < 0; i++)
+            if (infos[i].name == name)
+                found = (int)i;
+    // The list can change between the listing and the selection: selectDestination re-checks.
+    if (found < 0)
+    {
+        selectDestination(-1);
+        return false;
+    }
+    return selectDestination(found);
+}
+
 bool MidiCoreMidi::selectDestination(int idx)
 {
     if (idx < 0)

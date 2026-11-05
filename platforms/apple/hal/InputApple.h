@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -82,6 +83,9 @@ class InputApple
 
     // Any thread.
     void post(InputEvent e);
+    // Any thread: runs `fn` on the tracker thread at the start of the next dispatch(), before the
+    // posted input events (used to touch core state without racing the core's threads).
+    void postTask(std::function<void()> fn);
     // Tracker thread, once per loop: fires callbacks and synthesizes holds.
     void dispatch();
     // Same, with an explicit millisecond clock (tests).
@@ -90,6 +94,7 @@ class InputApple
   private:
     std::mutex mutex_;
     std::vector<InputEvent> queue_;
+    std::vector<std::function<void()>> tasks_;
     SwitchGroupApple pads_{ 48 };
     SwitchGroupApple buttons_{ 44 };
     EncoderApple encoder_;

@@ -129,6 +129,21 @@ TEST_CASE("pad press reaches core")
     REQUIRE(in.pads().isButtonPressed(5));
 }
 
+TEST_CASE("InputApple runs posted tasks on dispatch, before the input events")
+{
+    InputApple in;
+    int order = 0, taskAt = -1;
+    in.pads().setActionCallback(SwitchGroup::kPress, [](uint8_t) {});
+    in.postTask([&] { taskAt = order++; });
+    in.post({ InputEvent::Pad, 1, true, 0 });
+    REQUIRE(taskAt == -1); // nothing runs on the posting thread
+    in.dispatchAt(10);
+    REQUIRE(taskAt == 0);
+    REQUIRE(in.pads().isButtonPressed(1));
+    in.dispatchAt(20); // run once only
+    REQUIRE(order == 1);
+}
+
 namespace
 {
 int gHolds = 0;

@@ -63,6 +63,12 @@ void InputApple::post(InputEvent e)
     queue_.push_back(e);
 }
 
+void InputApple::postTask(std::function<void()> fn)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    tasks_.push_back(std::move(fn));
+}
+
 void InputApple::dispatch()
 {
     dispatchAt((uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -73,10 +79,14 @@ void InputApple::dispatch()
 void InputApple::dispatchAt(uint32_t now)
 {
     std::vector<InputEvent> events;
+    std::vector<std::function<void()>> tasks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         events.swap(queue_);
+        tasks.swap(tasks_);
     }
+    for (auto& t : tasks)
+        t();
     for (const InputEvent& e : events)
     {
         switch (e.kind)
