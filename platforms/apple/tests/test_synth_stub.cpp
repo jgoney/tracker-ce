@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +36,7 @@ class MemFileSystem : public FileSystem
     };
     std::map<std::string, std::vector<uint8_t>> files;
     std::vector<std::string> listing;
+    std::set<std::string> folders;
 
     std::vector<std::string_view> listFiles(const std::string& path,
                                             std::function<bool(const std::string&)> matcher,
@@ -58,7 +60,12 @@ class MemFileSystem : public FileSystem
         if (!w && !files.count(path))
             return std::nullopt;
         if (w)
+        {
+            auto slash = path.rfind('/');
+            if (slash != std::string::npos && !folders.count(path.substr(0, slash)))
+                return std::nullopt; // like a real FS: parent folder must exist
             files[path].clear();
+        }
         return new Handle{ path, 0, w };
     }
     void close(FileHandle f) override { delete static_cast<Handle*>(f); }
@@ -82,7 +89,7 @@ class MemFileSystem : public FileSystem
         static_cast<Handle*>(f)->pos += off;
         return true;
     }
-    void createFolder(const std::string&) override {}
+    void createFolder(const std::string& p) override { folders.insert(p); }
 };
 
 struct Fixture
@@ -157,6 +164,51 @@ TEST_CASE("stub patch bytes round-trip unchanged")
     REQUIRE(f.workspaceFs->files["1.patch"] == blob);
 
     REQUIRE_FALSE(store->loadPatch("missing", *patch, true));
+}
+
+TEST_CASE("folder-structured patch store saves, lists and reloads by type folder")
+{
+    Fixture f;
+    auto store = f.synth->createPatchStore(Synth::FileSystemId::kPatches, true);
+    const int fm = static_cast<int>(InstrumentTypeId::kFMSynth);
+    const int va = static_cast<int>(InstrumentTypeId::kVASynth);
+
+    std::vector<uint8_t> blob(5000);
+    for (size_t i = 0; i < blob.size(); i++)
+        blob[i] = static_cast<uint8_t>(i * 7);
+    f.patchesFs->files["" + std::to_string(fm) + "/src.patch"] = blob;
+    f.patchesFs->folders.insert(std::to_string(fm));
+
+    auto patch = store->createPatch(fm);
+    REQUIRE(store->loadPatch("src", *patch, true));
+    REQUIRE(store->savePatch("copy", *patch));
+    REQUIRE(f.patchesFs->folders.count(std::to_string(fm)));
+    REQUIRE(f.patchesFs->files.at(std::to_string(fm) + "/copy.patch") == blob);
+
+    // a VA patch goes to its own folder
+    auto vaPatch = store->createPatch(va);
+    REQUIRE(store->savePatch("other", *vaPatch));
+    REQUIRE(f.patchesFs->files.count(std::to_string(va) + "/other.patch"));
+    REQUIRE(f.patchesFs->files.at(std::to_string(va) + "/other.patch").empty());
+
+    auto names = store->listPatchesByType(fm);
+    REQUIRE(std::vector<std::string>(names.begin(), names.end()) ==
+            std::vector<std::string>{ "copy", "src" });
+
+    auto all = store->listPatchesFilter([](InstrumentTypeId) { return true; });
+    std::vector<std::pair<std::string, int>> got(all.begin(), all.end());
+    REQUIRE(got == std::vector<std::pair<std::string, int>>{ { "other", va }, { "copy", fm }, { "src", fm } });
+    auto onlyFm = store->listPatchesFilter([](InstrumentTypeId t) { return t == InstrumentTypeId::kFMSynth; });
+    REQUIRE(onlyFm.size() == 2);
+
+    REQUIRE(store->loadPatchInstrumentType("other") == InstrumentTypeId::kVASynth);
+    REQUIRE_FALSE(store->loadPatchInstrumentType("nope").has_value());
+
+    // byte-identical reload into a fresh patch
+    auto again = store->createPatch(fm);
+    REQUIRE(store->loadPatch("copy", *again, true));
+    REQUIRE(store->savePatch("copy2", *again));
+    REQUIRE(f.patchesFs->files.at(std::to_string(fm) + "/copy2.patch") == blob);
 }
 
 TEST_CASE("registry registers every engine")

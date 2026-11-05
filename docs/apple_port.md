@@ -15,3 +15,14 @@ Changes to `core/` made for the Apple host build. *neutral* means the hardware c
 - `core: portable C fallback for Polyverb Clip16 off ARM` - *neutral* (`#if defined(__arm__)` keeps the `ssat` asm).
 - `core: portable C implementations of Cortex-M DSP intrinsics in dspinst.h for Apple` - *neutral* (hardware path untouched, new block under `PLATFORM_APPLE`).
 - `core: keep strInstrument layout on 64-bit hosts via 4-byte SampleAddress handle` (`mtStructs.h`) - *neutral* (hardware keeps `int16_t*`).
+
+## Known limitations
+
+- **Synth patch edits are not saved.** The Mac build uses a silent PolySynth stand-in
+  (`platforms/apple/synth_stub/`). Loading a patch keeps its raw bytes and saving writes them back
+  unchanged, so patches round-trip with hardware, but any parameter or macro edit made to a loaded
+  patch on the Mac is silently dropped on save. A new patch (no source file) is saved as a
+  zero-length file, which hardware cannot load.
+- **Patch folder layout is unconfirmed.** The folder-structured store uses `Patches/<typeId>/<name>.patch`
+  (decimal instrument type id) and the flat store uses `<name>.patch`. This is a best guess from the
+  PolySynth headers, not checked against a real SD card, so a hardware `Patches/` tree may not be listed.
