@@ -2,7 +2,9 @@
 #include "config.h"
 #include "limits.h"
 #include "log.h"
+#ifndef PLATFORM_APPLE
 #include "malloc.h"
+#endif
 #include <polyassert.h>
 
 #include "Platform.h"
@@ -21,6 +23,7 @@ Profiler* Profiler::instance = nullptr;
 
 void Profiler::init()
 {
+#ifndef PLATFORM_APPLE
     // allocate and then free all available memory for malloc to claim all space
     // from sbrk, so that mallinfo data includes all of it
 
@@ -48,13 +51,18 @@ void Profiler::init()
     (void)mi;
     LOGF(
       "memory on init: arena: %d, allocated: %d, free: %d\r\n", mi.arena, mi.uordblks, mi.fordblks);
+#endif // PLATFORM_APPLE (no mallinfo/sbrk on the host)
 
     resetMeasuringAudio();
 }
 
 size_t Profiler::freeRamBytes()
 {
+#ifdef PLATFORM_APPLE
+    return 0;
+#else
     return mallinfo().fordblks;
+#endif
 }
 
 size_t Profiler::maxStackBytes()
