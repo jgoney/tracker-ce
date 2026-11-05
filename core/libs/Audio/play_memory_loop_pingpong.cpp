@@ -157,6 +157,9 @@ AUDIO_CORE_RAM audio_block_t* AudioPlayMemory::updateLoopPingPongNormal()
 
         return block;
     }
+    // unreachable: playing is only ever 0 or 1. Mirrors the !playing branch.
+    release(block);
+    return nullptr;
 }
 AUDIO_CORE_RAM audio_block_t* AudioPlayMemory::updateLoopPingPongReverse()
 {
