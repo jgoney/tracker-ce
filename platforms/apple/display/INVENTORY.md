@@ -71,7 +71,7 @@ Stencil, alpha test, colour mask and tag do not reach `Frame`.
 | `CMD_MEMCPY` | 6 | widget cache | implemented (RAM_G and RAM_DL address ranges) |
 | `CMD_TRANSLATE` / `CMD_ROTATE` / `CMD_LOADIDENTITY` / `CMD_SETMATRIX` | 4 / 2 / 2 / 2 | rotated text `label.cpp:209-213`, `songPlayer.cpp:643-647` | coprocessor matrix; `CMD_SETMATRIX` writes `BITMAP_TRANSFORM_A`-`F`, see "Matrices" (`CMD_SCALE` too, unused) |
 | `CMD_LOADIMAGE` + `CMD_GETPROPS` | 1 + 1 | image viewer `display.cpp:419,456-460` | JPEG/PNG parsed segment by segment, decoded with ImageIO to RGB565 (L8 with `OPT_MONO`) in RAM_G; `getImgProps` returns (end address, width, height); without `OPT_NODL` also the `CMD_SETBITMAP` words |
-| `CMD_SNAPSHOT2` | 2 | screenshots `snapshots.cpp:85,100` (fmt 0x20 ARGB8) | `Ft812Model::snapshotHook(PixelRect, addr, fmt)`; unset or false: the area is filled opaque black |
+| `CMD_SNAPSHOT2` | 2 | screenshots `snapshots.cpp:85,100` (fmt 0x20 ARGB8) | `Ft812Model::snapshotHook(PixelRect, addr, fmt)`, installed by `MetalRenderer::attachSnapshotHook` (Task 9); unset or false: the area is filled opaque black |
 | `CMD_MEMZERO` | 1 | `snapshots.cpp:117` | implemented |
 | `CMD_SETFONT2` | 2 | font upload `display.cpp:286,1369` | registers the font, writes the handle's bitmap words, see "Text" |
 | `CMD_SETBASE` | 2 | `songPlayer.cpp:240,244` (hex numbers) | stored (persists across lists) |
@@ -207,7 +207,10 @@ glyph tops face left, text reads bottom to top.
 - `CMD_SNAPSHOT2(fmt, ptr, x, y, w, h)` calls `snapshotHook(PixelRect{x, y, w', h}, ptr, fmt)` with
   `w' = w / 2` for ARGB8 (0x20: the core passes 1600 for the 800 px screen and reads 3200-byte
   rows), else `w`. Without a hook (or if it returns false) the area is filled with opaque black
-  in that format (ARGB8 bytes 00 00 00 FF). Task 9 provides the real hook.
+  in that format (ARGB8 bytes 00 00 00 FF). Task 9's hook (`MetalRenderer::attachSnapshotHook`)
+  renders the latest published frame (the list on screen) offscreen with Metal and writes the
+  rectangle as ARGB8 little endian (bytes B, G, R, A) with A = 255, black outside the screen;
+  other formats fall back to the black fill. The core's BMP writer reads these bytes as they are.
 - `CMD_LOADIMAGE(ptr, options)`: the following stream bytes are the file (the core sends it with
   `writeDataToCMD`, each chunk padded to 4). The model walks JPEG marker segments (lengths, then
   entropy data until a non-RST marker, until EOI) or PNG chunks (until IEND), so a FF D9 inside
@@ -216,3 +219,66 @@ glyph tops face left, text reads bottom to top.
   ImageIO (also on iOS) without EXIF orientation, sRGB, to RGB565 (5/6/5 truncation) for both
   JPEG and PNG (EVE picks other formats for some PNGs; the core only shows JPEG/PNG photos as
   RGB565, `img.cpp:111`), or L8 with `OPT_MONO`. PNG alpha is premultiplied onto black.
+
+## RAM_G snapshots in frames (Task 9)
+
+`ram_g` is written by the tracker thread without locks; renderers run on other threads. So on
+every `CMD_SWAP` (tracker thread) `Ft812Model` copies the RAM_G bytes the frame's bitmap prims read
+(each cell's `[source + cell * stride * height, + stride * height)`, 22-bit wrapped, and the
+palette for paletted formats) into the immutable `Frame` (`Frame::ramG`, read with
+`Frame::ramGBytes`). Whole 4 KB pages are copied, merged into runs, each with the page generations
+it was copied at. A run whose pages kept their generations is shared (same `shared_ptr`) with the
+previous frame, so a steady UI copies nothing; a rewritten font or a video frame copies only its
+pages. A published frame therefore never changes, whatever the tracker thread writes afterwards,
+and nobody reads live `ram_g` off the tracker thread. CpuRaster still reads `model.ramG()` (it is
+the reference and runs where RAM_G is quiescent: tests and the headless tool).
+
+## Metal renderer (Task 9)
+
+`MetalRenderer` (`MetalRenderer.{h,mm}`, `Shaders.metal`) draws a `Frame` with the same semantics
+as CpuRaster:
+
+- One instanced quad per element (point, line, strip segment, rect, edge-strip segment, bitmap
+  cell, gradient) covering the pixels CpuRaster visits; the fragment shader evaluates the same
+  distance functions and coverage `clamp((r - d) * scale + 0.5, 0, 1)` in logical pixels (one
+  device pixel of feathering at any scale). Uncovered fragments are discarded, so (ONE, ZERO)
+  leaves them alone as CpuRaster does. The clear colour is a (ONE, ZERO) quad over the screen.
+- Elements are drawn in display-list order; consecutive elements with the same blend mode and
+  scissor share one draw. Blend modes are fixed-function pipelines with EVE's factors on all four
+  channels (DST_ALPHA reads the target's alpha, as in CpuRaster). Scissor = `setScissorRect`,
+  clipped to the screen area (never touches the letterbox).
+- Bitmaps: each cell is decoded on the CPU by `Bitmaps::decode` (so every format and palette
+  matches CpuRaster) and appended to one shared texel buffer, keyed by (address, format, stride,
+  rows, palette, generation of the snapshot bytes). The shader samples it by hand: NEAREST,
+  BILINEAR, BORDER, REPEAT and `BITMAP_TRANSFORM` exactly as CpuRaster. Appends never overwrite
+  texels a frame in flight reads; when the buffer fills it is replaced (grown, or past 64 MB
+  started over with the current frame's cells).
+- Viewport (`MetalRenderer::fit`): integer scale when 800x480 fits, else uniform downscale;
+  centred with whole-pixel offsets.
+- Shaders are embedded by CMake and compiled at runtime (`newLibraryWithSource`): the Metal
+  toolchain is an optional Xcode download and the headless tool and tests must not need it.
+- Measured: the 956-prim pattern editor and the start screen render identically to CpuRaster
+  (max channel difference 1/255, from 8-bit blending); about 1 ms per offscreen frame including
+  GPU wait and readback (Apple silicon).
+
+### Visible differences and open questions (no hardware photo compared yet)
+
+Compared by eye: Metal vs CpuRaster are indistinguishable on the start screen and the pattern
+editor (`trackerce-headless --metal`). Compared with the Tracker as remembered (no photo):
+
+- **Panel pixel aspect.** The boot logo is `poly_logo_160x172_l8` (160 x 172 px) and renders as an
+  upright oval. 172 / 160 = 1.075 matches the pixel pitch of a 7" 800x480 panel (0.1926 x
+  0.179 mm), where it would be a circle: the Tracker's pixels are probably not square, and the art
+  is drawn for that. A faithful window would stretch x by about 1.075 (or the logo is meant to be
+  an oval). Needs a photo or the panel datasheet; the renderer scales uniformly for now.
+- **RECTS pixel convention / 1-px borders.** We grow a rect by `LINE_WIDTH / 16` on every side
+  (Minkowski), so `RECTS` (x0, y0)-(x1, y1) with the default width covers x0 - 1 .. x1 + 1, and
+  1-px separators drawn as rects come out 2-3 px wide with antialiased ends. EVE may instead cover
+  x0 .. x1 inclusive for width 16. The pattern editor's column separators and bottom-bar
+  underlines are where this would show; unconfirmed.
+- **CMD_NUMBER hex case.** We print upper case (`FF`); the coprocessor may print lower case.
+  Only `songPlayer.cpp` uses base 16.
+- **Top-right "1."** in the pattern editor title bar looks cut short; identical in CpuRaster, so it
+  is upstream of the renderer (core or model), not investigated here.
+- Gradients are not dithered (EVE dithers `CMD_GRADIENT`); text and bitmaps are NEAREST like the
+  core asks, so text is as crisp as on the panel at integer scales.

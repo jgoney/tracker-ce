@@ -21,6 +21,9 @@ Changes to `core/` made for the Apple host build. *neutral* means the hardware c
 ## Needs hardware test
 
 - Zero-initialised project buffer: save a project on the Tracker, reload it, and confirm it loads with its name intact.
+- Display look: compare `trackerce-headless --metal` screenshots (start screen, pattern editor) with
+  photos of a real Tracker+, in particular the panel pixel aspect (the 160x172 boot logo), RECTS
+  border widths and CMD_NUMBER hex case. See `platforms/apple/display/INVENTORY.md` (Task 9).
 
 ## Known limitations
 

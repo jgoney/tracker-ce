@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TrackerApple LANGUAGES C CXX)
+project(TrackerApple LANGUAGES C CXX OBJCXX)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo) # NDEBUG, like the hardware builds
@@ -118,6 +118,21 @@ target_link_libraries(TrackerApple PUBLIC TrackerCore
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
 
+# --- Metal renderer (shared with iOS: Foundation/Metal/ImageIO/CoreGraphics only, no AppKit) ---
+# The Metal toolchain (xcrun metal) is an optional Xcode download, so Shaders.metal is embedded as
+# a string and compiled at runtime with newLibraryWithSource (once per renderer, ~100 ms).
+file(READ ${CMAKE_CURRENT_LIST_DIR}/display/Shaders.metal TRACKER_METAL_SHADER_SRC)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/ShadersSource.h
+     CONTENT "// Generated from display/Shaders.metal by CMake.\nstatic const char kShaderSource[] = R\"METAL(@TRACKER_METAL_SHADER_SRC@)METAL\";\n"
+     @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/display/Shaders.metal)
+add_library(TrackerMetal STATIC display/MetalRenderer.mm)
+target_include_directories(TrackerMetal PUBLIC display PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(TrackerMetal PUBLIC TrackerApple
+    "-framework Metal" "-framework Foundation" "-framework ImageIO" "-framework CoreGraphics")
+target_compile_options(TrackerMetal PRIVATE
+    -std=gnu++20 -fobjc-arc -fno-rtti -fno-exceptions -Wall -Wextra)
+
 # operator new hook for AudioRuntime's render-thread allocation guard. Linked only into binaries
 # that want it (a test may define its own operator new instead).
 add_library(TrackerAllocGuard OBJECT runtime/AllocGuardNew.cpp)
@@ -154,16 +169,24 @@ target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint"
 target_link_libraries(apple_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
 
 # Headless runner: boots the core, dumps the last frame (--screenshot), runs it under AudioRuntime
-# (--audio-seconds); later --tone, --metal.
+# (--audio-seconds), --tone, --metal (Metal render to PNG).
 add_executable(trackerce-headless tools/trackerce_headless.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
 target_compile_options(trackerce-headless PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra;SHELL:-include cstdint>")
-target_link_libraries(trackerce-headless PRIVATE PolySynthStub TrackerApple TrackerCore)
+target_link_libraries(trackerce-headless PRIVATE PolySynthStub TrackerMetal TrackerApple TrackerCore)
 
 # FT812 model: coprocessor execution, display-list decoding, reference rasteriser.
 add_executable(display_tests tests/test_display_decode.cpp)
 target_compile_options(display_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(display_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# Metal renderer against CpuRaster goldens (tests/golden/*.png; a missing one is written and fails).
+add_executable(render_tests tests/test_render_golden.mm)
+target_compile_options(render_tests PRIVATE -std=gnu++20 -fobjc-arc "SHELL:-include cstdint")
+target_compile_definitions(render_tests PRIVATE
+    GOLDEN_DIR="${CMAKE_CURRENT_LIST_DIR}/tests/golden"
+    RENDER_OUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/render_out")
+target_link_libraries(render_tests PRIVATE TrackerMetal TrackerApple TrackerCore catch2_vendored)
 
 add_executable(filesystem_tests tests/test_filesystem.cpp)
 target_compile_options(filesystem_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
@@ -178,6 +201,7 @@ add_test(NAME apple_tests COMMAND apple_tests)
 # Wall-clock boot to the main UI (~4 s), alone in its own process; hidden from apple_tests.
 add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
 add_test(NAME display_tests COMMAND display_tests)
+add_test(NAME render_tests COMMAND render_tests)
 add_test(NAME runtime_tests COMMAND runtime_tests)
 add_test(NAME coreaudio_logic_tests COMMAND coreaudio_logic_tests)
 add_test(NAME midi_tests COMMAND midi_tests)

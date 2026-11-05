@@ -6,6 +6,9 @@
 // Runs N core update() calls (default 500), M milliseconds apart in wall-clock time (default 10:
 // the UI is time driven, e.g. the start screen shows for at least ~2 s), then rasterises the
 // last frame the FT812 model published with CpuRaster and writes it as a binary PPM.
+// With --metal it renders the frame with MetalRenderer instead, writes it as a PNG and prints how
+// many pixels differ from CpuRaster's rendering (any channel by more than 16); CMD_SNAPSHOT2
+// (screenshots) then goes through the Metal snapshot hook too.
 // With --audio-seconds, AudioRuntime drives the core instead (tracker + render threads) for S
 // seconds, pulled by a simulated real-time IOProc (no device), with Play pressed after 3 s; it
 // prints blocks rendered and underruns. TRACKERCE_ALLOC_GUARD=1 aborts on any allocation in
@@ -26,6 +29,7 @@
 #include "AudioRuntime.h"
 #include "CoreAudioOutput.h"
 #include "CpuRaster.h"
+#include "MetalRenderer.h"
 #include "PlatformApple.h"
 #include "Tracker.h"
 #include "mtMidi.h"
@@ -55,8 +59,8 @@ bool gFastExit = true; // --no-fast-exit: normal destruction and exit after a fa
 int usage()
 {
     std::fprintf(stderr,
-                 "usage: trackerce-headless --screenshot out.ppm [--updates N] [--interval-ms M] "
-                 "[--sd DIR] [--audio-seconds S] [--device ID] [--channels L,R] [--no-fast-exit]\n"
+                 "usage: trackerce-headless --screenshot out.ppm|out.png [--metal] [--updates N] "
+                 "[--interval-ms M] [--sd DIR] [--audio-seconds S] [--device ID] [--channels L,R] [--no-fast-exit]\n"
                  "       trackerce-headless --list-devices\n"
                  "       trackerce-headless --tone S [--device ID] [--channels L,R]\n");
     return 2;
@@ -228,6 +232,7 @@ int main(int argc, char** argv)
     double toneSeconds = 0;
     bool listDevices = false;
     bool midiMonitor = false;
+    bool metal = false;
     uint32_t deviceId = 0;
     bool haveDevice = false;
     int leftCh = 0, rightCh = 1;
@@ -247,6 +252,8 @@ int main(int argc, char** argv)
             audioSeconds = std::strtod(argv[++i], nullptr);
         else if (!std::strcmp(argv[i], "--tone") && hasValue)
             toneSeconds = std::strtod(argv[++i], nullptr);
+        else if (!std::strcmp(argv[i], "--metal"))
+            metal = true;
         else if (!std::strcmp(argv[i], "--midi-monitor"))
             midiMonitor = true;
         else if (!std::strcmp(argv[i], "--no-fast-exit"))
@@ -310,6 +317,17 @@ int main(int argc, char** argv)
 
     static PlatformApple platform(sdRoot);
     Tracker* tracker = Tracker::getInstance();
+    std::unique_ptr<MetalRenderer> renderer;
+    if (metal)
+    {
+        renderer = MetalRenderer::create();
+        if (!renderer)
+        {
+            std::fprintf(stderr, "Metal is not available\n");
+            return 1;
+        }
+        renderer->attachSnapshotHook(platform.display()); // before the tracker thread starts
+    }
     if (audioSeconds > 0)
     {
         AudioRuntime rt(tracker, &platform);
@@ -372,7 +390,37 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "no frame was published\n");
         return 1;
     }
-    if (!CpuRaster::toPPM(*frame, platform.display(), screenshot))
+    if (renderer)
+    {
+        std::vector<uint8_t> bgra;
+        if (!renderer->renderToPNG(*frame, screenshot) || !renderer->renderToBGRA(*frame, 1, bgra))
+        {
+            std::fprintf(stderr, "cannot render or write %s\n", screenshot);
+            return 1;
+        }
+        const std::vector<uint8_t> rgb = CpuRaster::render(*frame, platform.display());
+        size_t differ = 0;
+        int maxDiff = 0;
+        for (size_t i = 0; i < rgb.size() / 3; i++)
+        {
+            int d = 0;
+            for (int k = 0; k < 3; k++)
+                d = std::max(d, std::abs(int(rgb[i * 3 + k]) - int(bgra[i * 4 + 2 - k])));
+            maxDiff = std::max(maxDiff, d);
+            differ += d > 16;
+        }
+        std::printf("metal vs CpuRaster: %.3f %% of pixels differ by > 16 (max channel diff %d)\n",
+                    100.0 * double(differ) / double(rgb.size() / 3), maxDiff);
+        // offscreen render + GPU wait + readback: an upper bound for one on-screen frame
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; i++)
+            renderer->renderToBGRA(*frame, 1, bgra);
+        const double ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0).count() / 20;
+        std::printf("metal offscreen render (incl. wait + readback): %.2f ms\n", ms);
+        MetalRenderer::detachSnapshotHook(platform.display());
+    }
+    else if (!CpuRaster::toPPM(*frame, platform.display(), screenshot))
     {
         std::fprintf(stderr, "cannot write %s\n", screenshot);
         return 1;
