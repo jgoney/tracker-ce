@@ -70,7 +70,7 @@ Settings (Cmd+,): audio device and left/right output channel, MIDI destination, 
 
 Launch arguments for automation: `--screenshot PATH [--screenshot-after S]` (offscreen render of the current frame), `--debug`, `--quit-after S`. Test hooks (`--test-clock-play`: USB clock out on via the tracker thread, press Play after 3 s; `--test-key`; the `TRACKERCE_TEST_HANG_*` env vars) exist only when built with `-DTRACKERCE_TEST_HOOKS=ON` (the default for Debug builds, off otherwise), so a Release app does not ship them.
 
-### Keyboard map (overlay: Cmd+/, also generated from `KeyMap.swift`)
+### Keyboard map (overlay: Cmd+K, or Help > Keyboard Map; also generated from `KeyMap.swift`)
 
 Keys are matched by physical position (ANSI), so layout does not matter. Key repeat is ignored (a press is sent once; the core synthesises holds); losing window focus releases everything.
 

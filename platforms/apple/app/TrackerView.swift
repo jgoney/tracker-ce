@@ -105,7 +105,7 @@ struct ContentView: View {
                         Text(sec.0).font(.headline)
                         ForEach(sec.1, id: \.self) { Text($0).font(.system(size: 12, design: .monospaced)) }
                     }
-                    Text("Cmd+/ or Esc to close").font(.caption).foregroundStyle(.secondary)
+                    Text("Cmd+K to close").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(16)
                 .background(.black.opacity(0.88)).foregroundStyle(.white)

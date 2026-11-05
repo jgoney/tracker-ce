@@ -54,7 +54,7 @@ enum KeyMap {
         let named: [Int: String] = [
             8: "Params", 9: "Performance", 10: "File", 11: "Config", 12: "Master",
             13: "Sample Load", 14: "Sample Play", 15: "Sample Edit", 16: "Sample Rec", 17: "Song",
-            18: "Note", 19: "Instr", 20: "Vol", 21: "Fx", 22: "Pattern", 23: "Play", 24: "Copy",
+            18: "Note", 19: "Instr", 20: "Fx 2", 21: "Fx 1", 22: "Pattern", 23: "Play", 24: "Copy",
             25: "Insert", 26: "Up", 27: "Delete", 28: "Rec", 29: "Shift", 30: "Left", 31: "Down",
             32: "Right", 33: "Mini Middle", 34: "Menu", 35: "Fn1", 36: "Fn2", 37: "Fn3",
             38: "Fn4", 39: "+10", 40: "+1", 41: "-1", 42: "-10", 43: "Game",
@@ -102,7 +102,7 @@ enum KeyMap {
                 "Page Up / Page Down, keypad + / -, Option+. / Option+, : +1 / -1",
                 "Hold Shift for +-10. Trackpad / mouse scroll: +-1 per step (Shift: +-10)",
             ]),
-            ("App", ["Cmd+/ : this overlay   Cmd+D : debug overlay   Cmd+, : settings"]),
+            ("App", ["Cmd+K : this overlay   Cmd+D : debug overlay   Cmd+, : settings"]),
         ]
     }
 }

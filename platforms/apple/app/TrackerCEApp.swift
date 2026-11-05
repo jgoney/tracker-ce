@@ -113,7 +113,7 @@ struct TrackerCEApp: App {
             }
             CommandGroup(replacing: .help) {
                 Button(model.showKeyMap ? "Hide Keyboard Map" : "Keyboard Map") { model.showKeyMap.toggle() }
-                    .keyboardShortcut("/", modifiers: .command)
+                    .keyboardShortcut("k", modifiers: .command)
             }
         }
         Settings { SettingsView() }
