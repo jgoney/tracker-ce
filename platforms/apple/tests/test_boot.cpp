@@ -1,7 +1,11 @@
 // Headless boot of the whole core on the Apple HAL, plus the platform bits that need no UI.
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdint>
+#include <mach/mach_time.h>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,8 +21,10 @@
 #include "Tracker.h"
 #include "TimerApple.h"
 
+#include "MidiCoreMidi.h"
 #include "fileManager.h"
 #include "fileManagerDefs.h"
+#include "mtMidi.h"
 #include "mtStructs.h"
 #include "Synth.h"
 
@@ -339,4 +345,57 @@ TEST_CASE("boot produces frames", "[.boot]")
     auto f = b.platform.display().latestFrame();
     REQUIRE(f);
     REQUIRE(f->prims.size() > 50);
+}
+
+// The core's real sendMidiClock path, on a thread playing the render thread: its delayUs must be
+// exactly the sub-block offset (frozen clock => elapsed 0), so the clock lands at that offset.
+TEST_CASE("core sendMidiClock on the render thread delays by exactly the sub-block offset", "[midi]")
+{
+    Booted& b = booted();
+    MidiCoreMidi& midi = b.platform.midi();
+    struct Got
+    {
+        std::mutex m;
+        std::vector<std::pair<uint64_t, uint8_t>> v;
+    } got;
+    midi.setLatencySourceForTest([] { return 0.0; });
+    midi.setTransmitHookForTest([&](uint64_t ts, const uint8_t* bytes, int) {
+        std::lock_guard<std::mutex> g(got.m);
+        got.v.push_back({ ts, bytes[0] });
+    });
+    const uint64_t t0 = MidiCoreMidi::hostNow();
+    midi.noteCycle(t0, 50, 0);
+    const auto savedClk = mtConfig.midi.clkOut;
+    mtConfig.midi.clkOut = clockOut_usb;
+    std::thread render([&] {
+        TimerApple::beginBlock(50);
+        midiSetAudioBlockStartUs(b.platform.getTimer()->micros());
+        midiSetClockSubBlockOffsetUs(1234);
+        // time spent in the block before the clock is due must not shrink the delay
+        const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+        while (std::chrono::steady_clock::now() < end)
+        {
+        }
+        sendMidiClock();
+        TimerApple::endBlock();
+    });
+    render.join();
+    mtConfig.midi.clkOut = savedClk;
+    for (int i = 0; i < 1000; i++)
+    {
+        {
+            std::lock_guard<std::mutex> g(got.m);
+            if (!got.v.empty())
+                break;
+        }
+        usleep(2000);
+    }
+    midi.setTransmitHookForTest(nullptr);
+    std::lock_guard<std::mutex> g(got.m);
+    REQUIRE(got.v.size() == 1);
+    REQUIRE(got.v[0].second == 0xF8);
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    const double expectTicks = 1234e-6 * 1e9 * tb.denom / tb.numer;
+    REQUIRE(std::fabs((double)(got.v[0].first - t0) - expectTicks) <= 1.0);
 }

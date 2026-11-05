@@ -103,7 +103,12 @@ struct MidiCoreMidi::Hub
     std::atomic<bool> haveCycle{ false };
 
     std::mutex ringsMutex; // sender drain vs ring (de)registration; enqueuers never take it
-    std::vector<Ring*> rings;
+    std::vector<Ring*> renderRings;  // drained before every tracker-thread event (see run)
+    std::vector<Ring*> trackerRings;
+    // Largest stamp sent for a render-thread event. Tracker-thread events are stamped >= this so
+    // the output is a monotonic merge: a stop/panic/preview release can never overtake a note
+    // already rendered into a queued block (CoreMIDI delivers by timestamp).
+    uint64_t lastRenderStamp = 0;
 
     std::mutex ctlMutex; // sender vs attach/detach/test hooks (never taken on the enqueue path)
     CoreAudioOutput* out = nullptr;
@@ -117,7 +122,8 @@ struct MidiCoreMidi::Hub
 
     Hub()
     {
-        rings.reserve(8);
+        renderRings.reserve(8);
+        trackerRings.reserve(8);
         semaphore_create(mach_task_self(), &sem, SYNC_POLICY_FIFO, 0);
         if (MIDIClientCreate(CFSTR("Tracker CE"), nullptr, nullptr, &client) != noErr)
         {
@@ -236,7 +242,49 @@ struct MidiCoreMidi::Hub
         else
             ts = addSeconds(e.inBlock ? MidiCoreMidi::hostNow() : e.enqueuedHost,
                             latency + user * 1e-3);
+        if (e.inBlock)
+            lastRenderStamp = std::max(lastRenderStamp, ts);
+        else
+            ts = std::max(ts, lastRenderStamp);
         transmit(ts, e);
+    }
+
+    // Caller holds ringsMutex. Render rings first, then each tracker event after re-draining the
+    // render rings: every render event enqueued before a tracker event is then already sent.
+    bool drainOnce()
+    {
+        bool any = false;
+        double latency = 0;
+        bool haveLatency = false;
+        auto latencyNow = [&] {
+            if (!haveLatency)
+            {
+                latency = latencySeconds();
+                haveLatency = true;
+            }
+            return latency;
+        };
+        auto drainRender = [&] {
+            Event e;
+            for (Ring* r : renderRings)
+                while (r->pop(e))
+                {
+                    any = true;
+                    handle(e, latencyNow());
+                }
+        };
+        drainRender();
+        for (Ring* r : trackerRings)
+        {
+            Event e;
+            while (r->pop(e))
+            {
+                any = true;
+                drainRender();
+                handle(e, latencyNow());
+            }
+        }
+        return any;
     }
 
     void run()
@@ -245,27 +293,11 @@ struct MidiCoreMidi::Hub
         while (!stopping.load(std::memory_order_acquire))
         {
             semaphore_timedwait(sem, mach_timespec_t{ 0, 100 * 1000 * 1000 });
-            bool any = true;
-            while (any && !stopping.load(std::memory_order_relaxed))
+            for (;;)
             {
-                any = false;
-                double latency = 0;
-                bool haveLatency = false;
                 std::lock_guard<std::mutex> g(ringsMutex);
-                for (Ring* r : rings)
-                {
-                    Event e;
-                    while (r->pop(e))
-                    {
-                        any = true;
-                        if (!haveLatency)
-                        {
-                            latency = latencySeconds();
-                            haveLatency = true;
-                        }
-                        handle(e, latency);
-                    }
-                }
+                if (stopping.load(std::memory_order_relaxed) || !drainOnce())
+                    break;
             }
         }
     }
@@ -277,16 +309,16 @@ MidiCoreMidi::MidiCoreMidi(MidiCoreMidi* shareWith)
       trackerRing_(new Ring)
 {
     std::lock_guard<std::mutex> g(hub_->ringsMutex);
-    hub_->rings.push_back(renderRing_.get());
-    hub_->rings.push_back(trackerRing_.get());
+    hub_->renderRings.push_back(renderRing_.get());
+    hub_->trackerRings.push_back(trackerRing_.get());
 }
 
 MidiCoreMidi::~MidiCoreMidi()
 {
     std::lock_guard<std::mutex> g(hub_->ringsMutex);
-    auto& v = hub_->rings;
-    v.erase(std::remove_if(v.begin(), v.end(), [&](Ring* r) { return r == renderRing_.get() || r == trackerRing_.get(); }),
-            v.end());
+    auto drop = [](std::vector<Ring*>& v, Ring* r) { v.erase(std::remove(v.begin(), v.end(), r), v.end()); };
+    drop(hub_->renderRings, renderRing_.get());
+    drop(hub_->trackerRings, trackerRing_.get());
 }
 
 std::vector<std::string> MidiCoreMidi::listDestinations()

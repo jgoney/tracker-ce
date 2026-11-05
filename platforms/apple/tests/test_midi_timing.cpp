@@ -2,7 +2,9 @@
 // allocation-free enqueue, and a round trip through real CoreMIDI endpoints created in-process.
 #include <catch2/catch_test_macros.hpp>
 
+#include "AudioRuntime.h"
 #include "MidiCoreMidi.h"
+#include "Tracker.h"
 #include "TimerApple.h"
 
 #include <Block.h>
@@ -388,4 +390,147 @@ TEST_CASE("CoreMIDI round trip: virtual destination and published source", "[mid
     MIDIPortDispose(inPort);
     MIDIEndpointDispose(dest);
     MIDIClientDispose(client);
+}
+
+// R14: a tracker-thread note-off must never overtake a note-on rendered into a future block.
+TEST_CASE("tracker-thread event is clamped behind queued render-thread events", "[midi]")
+{
+    MidiCoreMidi midi;
+    Capture cap;
+    cap.install(midi);
+    midi.setLatencySourceForTest([] { return 0.0; });
+    midi.noteCycle(MidiCoreMidi::hostNow(), 0, 0);
+    std::thread render([&] {
+        TimerApple::beginBlock(200); // ~580 ms ahead of "now"
+        midi.sendNoteOn(60, 100, 1);
+        TimerApple::endBlock();
+    });
+    render.join();
+    midi.sendNoteOff(60, 0, 1); // tracker thread, "now"
+    REQUIRE(cap.waitFor(2));
+    REQUIRE(cap.got[0].bytes == std::vector<uint8_t>{ 0x90, 60, 100 });
+    REQUIRE(cap.got[1].bytes == std::vector<uint8_t>{ 0x80, 60, 0 });
+    REQUIRE(cap.got[1].ts >= cap.got[0].ts);
+}
+
+TEST_CASE("note-on then clamped note-off arrive in order at a CoreMIDI destination", "[midi][coremidi]")
+{
+    struct Rx
+    {
+        std::mutex m;
+        std::vector<std::pair<uint64_t, uint8_t>> events; // delivery timestamp, status
+    } rx;
+    MIDIClientRef client = 0;
+    REQUIRE(MIDIClientCreate(CFSTR("order client"), nullptr, nullptr, &client) == noErr);
+    MIDIEndpointRef dest = 0;
+    Rx* rxp = &rx;
+    MIDIReceiveBlock blk = (MIDIReceiveBlock)Block_copy(^(const MIDIEventList* list, void*) {
+      const MIDIEventPacket* p = &list->packet[0];
+      for (UInt32 i = 0; i < list->numPackets; i++)
+      {
+          for (UInt32 w = 0; w < p->wordCount; w++)
+          {
+              std::lock_guard<std::mutex> g(rxp->m);
+              rxp->events.push_back({ p->timeStamp, (uint8_t)(p->words[w] >> 16) });
+          }
+          p = MIDIEventPacketNext(p);
+      }
+    });
+    REQUIRE(MIDIDestinationCreateWithProtocol(client, CFSTR("TrackerCE order destination"),
+                                              kMIDIProtocol_1_0, &dest, blk) == noErr);
+    MidiCoreMidi midi;
+    midi.setLatencySourceForTest([] { return 0.0; });
+    int idx = -1;
+    auto names = MidiCoreMidi::listDestinations();
+    for (size_t i = 0; i < names.size(); i++)
+        if (names[i].find("TrackerCE order destination") != std::string::npos)
+            idx = (int)i;
+    REQUIRE(idx >= 0);
+    REQUIRE(midi.selectDestination(idx));
+    midi.noteCycle(MidiCoreMidi::hostNow(), 0, 0);
+    std::thread render([&] {
+        TimerApple::beginBlock(30); // ~87 ms ahead
+        midi.sendNoteOn(60, 100, 1);
+        TimerApple::endBlock();
+    });
+    render.join();
+    midi.sendNoteOff(60, 0, 1);
+    const auto deadline = std::chrono::steady_clock::now() + 3000ms;
+    for (;;)
+    {
+        {
+            std::lock_guard<std::mutex> g(rx.m);
+            if (rx.events.size() >= 2)
+                break;
+        }
+        if (std::chrono::steady_clock::now() > deadline)
+            break;
+        std::this_thread::sleep_for(2ms);
+    }
+    std::lock_guard<std::mutex> g(rx.m);
+    REQUIRE(rx.events.size() == 2);
+    REQUIRE(rx.events[0].second == 0x90);
+    REQUIRE(rx.events[1].second == 0x80);
+    REQUIRE(rx.events[1].first >= rx.events[0].first);
+    MIDIEndpointDispose(dest);
+    MIDIClientDispose(client);
+}
+
+// AudioRuntime must freeze the render thread's clock around every block it renders.
+namespace
+{
+class ClockProbeTracker final : public Tracker
+{
+  public:
+    static constexpr int kMax = 16;
+    void init(Platform*) override {}
+    void update() override { std::this_thread::sleep_for(1ms); }
+    void updateAudioBuffers(void*, void*, int) override
+    {
+        const int i = n.load();
+        if (i < kMax)
+        {
+            TimerApple timer;
+            micros[i] = timer.micros();
+            block[i] = TimerApple::inBlock() ? TimerApple::currentBlockIndex() : ~0ull;
+            // a busy-wait inside the block must not move the frozen clock
+            const auto end = std::chrono::steady_clock::now() + 50us;
+            while (std::chrono::steady_clock::now() < end)
+            {
+            }
+            microsAfter[i] = timer.micros();
+        }
+        n.store(i + 1);
+    }
+    void updateInputAudioBuffers(void*, void*, int) override {}
+    void (*getStartDisplayFunc())(Platform*) override { return [](Platform*) {}; }
+    Platform* getPlatform() override { return nullptr; }
+    std::atomic<int> n{ 0 };
+    uint32_t micros[kMax]{}, microsAfter[kMax]{};
+    uint64_t block[kMax]{};
+};
+} // namespace
+
+TEST_CASE("AudioRuntime freezes TimerApple time around each rendered block", "[midi][runtime]")
+{
+    ClockProbeTracker tracker;
+    AudioRuntime rt(&tracker, nullptr);
+    rt.start();
+    float l[128], r[128];
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (tracker.n.load() < ClockProbeTracker::kMax && std::chrono::steady_clock::now() < deadline)
+    {
+        rt.pull(l, r, 128);
+        std::this_thread::sleep_for(1ms);
+    }
+    rt.stop();
+    REQUIRE(tracker.n.load() >= ClockProbeTracker::kMax);
+    for (int i = 0; i < ClockProbeTracker::kMax; i++)
+    {
+        INFO("block " << i);
+        REQUIRE(tracker.block[i] == (uint64_t)i);
+        REQUIRE(tracker.micros[i] == (uint32_t)TimerApple::blockStartUs((uint64_t)i));
+        REQUIRE(tracker.microsAfter[i] == tracker.micros[i]);
+    }
+    REQUIRE_FALSE(TimerApple::inBlock()); // not leaked onto this thread
 }
