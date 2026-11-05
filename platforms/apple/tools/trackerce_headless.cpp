@@ -85,9 +85,9 @@ bool openOutput(CoreAudioOutput& out, uint32_t deviceId, int l, int r)
 {
     if (deviceId == 0)
         deviceId = CoreAudioOutput::defaultOutputDevice();
-    if (!out.open(deviceId, (uint8_t)l, (uint8_t)r))
+    if (!out.open(deviceId, (uint8_t)l, (uint8_t)r)) // bounded: a hung driver times out after 2 s
     {
-        std::fprintf(stderr, "cannot open device %u\n", deviceId);
+        std::fprintf(stderr, "cannot open device %u (failed or unresponsive)\n", deviceId);
         return false;
     }
     std::printf("device %u: %.0f Hz%s, %u-frame buffer, latency %.2f ms\n",
@@ -191,10 +191,10 @@ int main(int argc, char** argv)
         rt.stop();
         std::printf("tone: %.1f s, %llu IOProc cycles, %llu blocks rendered, %llu underruns\n",
                     toneSeconds,
-                    (unsigned long long)out.cycles.load(),
+                    (unsigned long long)out.cycles(),
                     (unsigned long long)rt.blocksRendered.load(),
                     (unsigned long long)rt.underruns.load());
-        return out.cycles.load() > 0 ? 0 : 1;
+        return out.cycles() > 0 ? 0 : 1;
     }
     if (!screenshot || updates < 0 || intervalMs < 0)
         return usage();
@@ -240,7 +240,7 @@ int main(int argc, char** argv)
         out.stop();
         rt.stop();
         if (haveDevice)
-            std::printf("device: %llu IOProc cycles\n", (unsigned long long)out.cycles.load());
+            std::printf("device: %llu IOProc cycles\n", (unsigned long long)out.cycles());
         std::printf("audio: %.1f s, %llu blocks rendered, %llu underruns, peak %.4f\n",
                     audioSeconds,
                     (unsigned long long)rt.blocksRendered.load(),

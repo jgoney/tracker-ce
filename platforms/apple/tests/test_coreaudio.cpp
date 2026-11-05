@@ -1,77 +1,51 @@
-// CoreAudioOutput against real devices. Tagged [hardware]: needs an audio output, excluded from
-// the default ctest run (label "hardware").
+// CoreAudioOutput against real devices (needs an audio output; built into ctest only with
+// -DTRACKERCE_HW_TESTS=ON, label "hardware"). Hardware-free logic lives in test_coreaudio_logic.cpp.
 #include <catch2/catch_test_macros.hpp>
 
-// MacTypes.h's global `Rect` clashes with display/Frame.h (see CoreAudioOutput.cpp).
-#define Rect MacTypesRect
-#include <CoreAudio/CoreAudio.h>
-#undef Rect
-
-#include "AudioRuntime.h"
 #include "CoreAudioOutput.h"
-#include "Tracker.h"
+#include "test_coreaudio_common.h"
 
 #include <atomic>
-#include <chrono>
-#include <cstdint>
-#include <thread>
+#include <mutex>
+#include <string>
+#include <vector>
 
+using namespace ca_test;
+using Status = CoreAudioOutput::Status;
 
 namespace
 {
-using namespace std::chrono_literals;
-
-void startDisplayNoop(Platform*)
+struct StatusLog
 {
-}
-
-class FakeTracker final : public Tracker
-{
-  public:
-    void init(Platform*) override {}
-    void update() override { std::this_thread::sleep_for(1ms); }
-    void updateAudioBuffers(void* l, void* r, int length) override
+    std::mutex m;
+    std::vector<std::pair<Status, std::string>> v;
+    void attach(CoreAudioOutput& o)
     {
-        // 440 Hz-ish ramp so the output is not silent
-        auto* pl = (int16_t*)l;
-        auto* pr = (int16_t*)r;
-        for (int i = 0; i < length; i++)
+        o.setOnStatus([this](Status s, std::string n)
         {
-            phase = (phase + 1) % 100;
-            pl[i] = pr[i] = (int16_t)(phase * 100);
-        }
+            std::lock_guard<std::mutex> g(m);
+            v.emplace_back(s, n);
+        });
     }
-    void updateInputAudioBuffers(void*, void*, int) override {}
-    void (*getStartDisplayFunc())(Platform*) override { return startDisplayNoop; }
-    Platform* getPlatform() override { return nullptr; }
-    int phase = 0;
-};
-
-bool waitUntil(const std::function<bool()>& pred, std::chrono::milliseconds timeout)
-{
-    const auto end = std::chrono::steady_clock::now() + timeout;
-    while (!pred())
+    size_t count()
     {
-        if (std::chrono::steady_clock::now() > end)
-            return false;
-        std::this_thread::sleep_for(1ms);
+        std::lock_guard<std::mutex> g(m);
+        return v.size();
     }
-    return true;
-}
-} // namespace
-
-// Reaches the private fallback entry point.
-struct CoreAudioOutputTestAccess
-{
-    static void deviceDead(CoreAudioOutput& o) { o.handleDeviceDead(); }
+    Status last()
+    {
+        std::lock_guard<std::mutex> g(m);
+        return v.back().first;
+    }
 };
+} // namespace
 
 TEST_CASE("test_lists_builtin_output", "[hardware]")
 {
     const auto devs = CoreAudioOutput::listOutputDevices();
     REQUIRE(!devs.empty());
-    const CoreAudioOutput::DeviceId def = CoreAudioOutput::defaultOutputDevice();
-    REQUIRE(def != CoreAudioOutput::kNoDevice);
+    const AudioDeviceID def = CoreAudioOutput::defaultOutputDevice();
+    REQUIRE(def != kAudioObjectUnknown);
     bool foundDefault = false;
     for (auto& d : devs)
     {
@@ -80,6 +54,7 @@ TEST_CASE("test_lists_builtin_output", "[hardware]")
         foundDefault |= d.id == def;
     }
     REQUIRE(foundDefault);
+    REQUIRE(CoreAudioOutput::builtInOutputDevice() != kAudioObjectUnknown);
 }
 
 TEST_CASE("test_plays_default_device", "[hardware]")
@@ -87,26 +62,120 @@ TEST_CASE("test_plays_default_device", "[hardware]")
     FakeTracker fake;
     AudioRuntime rt(&fake, nullptr);
     CoreAudioOutput out(rt);
-    std::atomic<uint64_t> cycleCalls{ 0 };
-    uint64_t lastBlock = 0;
-    out.onCycle = [&](uint64_t host, uint64_t block, size_t off)
+    StatusLog log;
+    log.attach(out);
+    std::atomic<uint64_t> calls{ 0 }, lastBlock{ 0 }, badOffset{ 0 }, zeroHost{ 0 };
+    out.setOnCycle([&](uint64_t host, uint64_t block, size_t off)
     {
-        REQUIRE(host != 0);
-        REQUIRE(off < AudioRuntime::kBlockFrames);
+        if (host == 0)
+            zeroHost++;
+        if (off >= AudioRuntime::kBlockFrames)
+            badOffset++;
         lastBlock = block;
-        cycleCalls++;
-    };
+        calls++;
+    });
     REQUIRE(out.open(CoreAudioOutput::defaultOutputDevice()));
     REQUIRE(out.outputLatencySeconds() > 0);
     rt.start();
     REQUIRE(out.start());
-    REQUIRE(waitUntil([&] { return cycleCalls.load() > 20; }, 2000ms));
-    REQUIRE(lastBlock > 0);
+    REQUIRE(out.isRunning());
+    REQUIRE(waitUntil([&] { return calls.load() > 20; }, 2000ms));
+    out.stop();
+    REQUIRE(!out.isRunning());
+    rt.stop();
+    REQUIRE(lastBlock.load() > 0);
+    REQUIRE(badOffset.load() == 0);
+    REQUIRE(zeroHost.load() == 0);
+    REQUIRE(log.count() >= 1);
+}
+
+// Dead device whose "default" is still the dead device: falls to the built-in output. Goes through
+// the listener path (queue hop + handler), with liveness injected.
+TEST_CASE("test_dead_device_default_still_dead_falls_to_builtin", "[hardware]")
+{
+    const AudioDeviceID dev = CoreAudioOutput::builtInOutputDevice();
+    REQUIRE(dev != kAudioObjectUnknown);
+    FakeTracker fake;
+    AudioRuntime rt(&fake, nullptr);
+    CoreAudioOutput out(rt);
+    StatusLog log;
+    log.attach(out);
+    REQUIRE(out.open(dev));
+    rt.start();
+    REQUIRE(out.start());
+    REQUIRE(waitUntil([&] { return out.cycles() > 10; }, 2000ms));
+    const size_t statusBefore = log.count();
+
+    std::atomic<bool> killed{ true };
+    std::atomic<int> defaultCalls{ 0 }, builtinCalls{ 0 };
+    CoreAudioOutputTestHooks h;
+    h.alive = [&](AudioDeviceID id) { return !(killed && id == dev); };
+    h.defaultDevice = [&] { defaultCalls++; return dev; }; // still the dead device
+    h.builtinDevice = [&]
+    {
+        builtinCalls++;
+        killed = false; // "replugged" by the time the built-in is tried
+        return dev;
+    };
+    CoreAudioOutputTestAccess::setHooks(out, h);
+
+    const uint64_t reopensBefore = out.reopens();
+    CoreAudioOutputTestAccess::postDeviceDead(out);
+    REQUIRE(waitUntil([&] { return out.reopens() == reopensBefore + 1; }, 5000ms));
+    REQUIRE(waitUntil([&] { return log.count() > statusBefore; }, 2000ms));
+    REQUIRE(log.last() == Status::FellBack);
+    REQUIRE(defaultCalls.load() >= 1);
+    REQUIRE(builtinCalls.load() >= 1);
+    REQUIRE(out.isOpen());
+    REQUIRE(out.isRunning());
+    const size_t pos = rt.readPosition();
+    REQUIRE(waitUntil([&] { return rt.readPosition() > pos + 4 * AudioRuntime::kBlockFrames; }, 500ms));
     out.stop();
     rt.stop();
 }
 
-TEST_CASE("test_device_loss_falls_back", "[hardware]")
+// Nothing can be opened: Failed, isRunning() tells the truth, and the next device change retries.
+TEST_CASE("test_failed_fallback_then_retry_on_device_change", "[hardware]")
+{
+    const AudioDeviceID dev = CoreAudioOutput::builtInOutputDevice();
+    REQUIRE(dev != kAudioObjectUnknown);
+    FakeTracker fake;
+    AudioRuntime rt(&fake, nullptr);
+    CoreAudioOutput out(rt);
+    StatusLog log;
+    log.attach(out);
+    REQUIRE(out.open(dev));
+    rt.start();
+    REQUIRE(out.start());
+
+    std::atomic<bool> nothing{ true };
+    CoreAudioOutputTestHooks h;
+    h.alive = [&](AudioDeviceID id) { return !(nothing && id == dev); };
+    h.defaultDevice = [&] { return nothing ? (AudioDeviceID)0xFFFF0002 : dev; };
+    h.builtinDevice = [&] { return nothing ? (AudioDeviceID)0xFFFF0003 : dev; };
+    CoreAudioOutputTestAccess::setHooks(out, h);
+
+    const size_t n0 = log.count();
+    CoreAudioOutputTestAccess::postDeviceDead(out);
+    REQUIRE(waitUntil([&] { return log.count() > n0; }, 5000ms));
+    REQUIRE(log.last() == Status::Failed);
+    REQUIRE(!out.isOpen());
+    REQUIRE(!out.isRunning());
+
+    nothing = false; // a device appears
+    const size_t n1 = log.count();
+    CoreAudioOutputTestAccess::postDevicesChanged(out);
+    REQUIRE(waitUntil([&] { return log.count() > n1; }, 5000ms));
+    REQUIRE(log.last() == Status::FellBack);
+    REQUIRE(out.isOpen());
+    REQUIRE(out.isRunning()); // the intent to run survived the outage
+    REQUIRE(waitUntil([&] { return out.cycles() > 0; }, 1000ms));
+    out.stop();
+    rt.stop();
+}
+
+// A stalled IOProc (no cycle for 1 s while running) is treated as a dead device.
+TEST_CASE("test_stall_watchdog_reopens", "[hardware]")
 {
     FakeTracker fake;
     AudioRuntime rt(&fake, nullptr);
@@ -114,17 +183,12 @@ TEST_CASE("test_device_loss_falls_back", "[hardware]")
     REQUIRE(out.open(CoreAudioOutput::defaultOutputDevice()));
     rt.start();
     REQUIRE(out.start());
-    REQUIRE(waitUntil([&] { return out.cycles.load() > 10; }, 2000ms));
-
-    const uint64_t reopensBefore = out.reopens.load();
-    const size_t posBefore = rt.readPosition();
-    CoreAudioOutputTestAccess::deviceDead(out); // as if the device vanished
-
-    REQUIRE(out.reopens.load() == reopensBefore + 1);
-    REQUIRE(out.isOpen());
-    REQUIRE(out.deviceId() == CoreAudioOutput::defaultOutputDevice());
-    // pull() keeps being called on the new device within 500 ms
-    REQUIRE(waitUntil([&] { return rt.readPosition() > posBefore + 4 * AudioRuntime::kBlockFrames; }, 500ms));
+    REQUIRE(waitUntil([&] { return out.cycles() > 10; }, 2000ms));
+    CoreAudioOutputTestAccess::freezeWatchdogClock(out, true);
+    REQUIRE(waitUntil([&] { return out.reopens() >= 1; }, 4000ms));
+    CoreAudioOutputTestAccess::freezeWatchdogClock(out, false);
+    const uint64_t c = out.cycles();
+    REQUIRE(waitUntil([&] { return out.cycles() > c + 20; }, 1000ms));
     REQUIRE(out.isRunning());
     out.stop();
     rt.stop();
@@ -148,15 +212,15 @@ TEST_CASE("test_external_rate_change_uses_converter", "[hardware]")
     REQUIRE(!out.usingConverter());
     rt.start();
     REQUIRE(out.start());
-    REQUIRE(waitUntil([&] { return out.cycles.load() > 10; }, 2000ms));
+    REQUIRE(waitUntil([&] { return out.cycles() > 10; }, 2000ms));
 
     setRate(48000);
     const bool followed = waitUntil([&] { return out.usingConverter(); }, 3000ms);
     if (followed)
     {
         REQUIRE(out.deviceSampleRate() == 48000.0);
-        const uint64_t c0 = out.cycles.load();
-        REQUIRE(waitUntil([&] { return out.cycles.load() > c0 + 20; }, 1000ms));
+        const uint64_t c0 = out.cycles();
+        REQUIRE(waitUntil([&] { return out.cycles() > c0 + 20; }, 1000ms));
         REQUIRE(out.isRunning());
         REQUIRE(rt.underruns.load() == 0);
     }
