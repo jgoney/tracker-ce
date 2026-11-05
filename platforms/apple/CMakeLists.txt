@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS 14 minimum (the render-thread safety relies on chained fixups, macOS 12+).
+if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0 CACHE STRING "" FORCE)
+endif()
 project(TrackerApple LANGUAGES C CXX OBJCXX)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -210,4 +214,13 @@ add_test(NAME midi_tests COMMAND midi_tests)
 if(TRACKERCE_HW_TESTS)
     add_test(NAME coreaudio_tests COMMAND coreaudio_tests "[hardware]")
     set_tests_properties(coreaudio_tests PROPERTIES LABELS hardware)
+endif()
+
+# --- The Mac app (SwiftUI/AppKit only under app/): build/<dir>/app/Tracker CE (unofficial).app ---
+include(CheckLanguage)
+check_language(Swift)
+if(CMAKE_Swift_COMPILER)
+    add_subdirectory(app)
+else()
+    message(STATUS "Swift compiler not found: the Mac app is not built")
 endif()
