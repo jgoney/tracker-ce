@@ -140,6 +140,15 @@ bool ImageDecode::decode(const uint8_t* data,
         return false;
 
     const size_t w = CGImageGetWidth(image), h = CGImageGetHeight(image);
+    // The decoded texels must fit RAM_G (1 MiB): reject before allocating anything sized by the
+    // (untrusted) image dimensions.
+    constexpr size_t kRamGSize = 1024 * 1024;
+    const size_t bytesPerPixel = mono ? 1 : 2;
+    if (w == 0 || h == 0 || w > kRamGSize || h > kRamGSize || w * h * bytesPerPixel > kRamGSize)
+    {
+        CGImageRelease(image);
+        return false;
+    }
     std::vector<uint8_t> rgba(w * h * 4, 0);
     CGColorSpaceRef rgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     CGContextRef ctx = CGBitmapContextCreate(

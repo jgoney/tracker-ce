@@ -16,9 +16,9 @@ set(CORE_DIR ${REPO_ROOT}/core)
 # Version defines come from the same place as the hardware builds (version.mk).
 # BUILD_TAG is not needed by core sources.
 set(FW_EDITION_NAME CE)
-file(STRINGS ${REPO_ROOT}/version.mk _ver_lines REGEX "^ORIGINAL_VER_(MAJOR|MINOR|PATCH|BETA) *:=")
+file(STRINGS ${REPO_ROOT}/version.mk _ver_lines REGEX "^PLUS_VER_(MAJOR|MINOR|PATCH|BETA) *:=")
 foreach(_l IN LISTS _ver_lines)
-    if(_l MATCHES "ORIGINAL_VER_([A-Z]+) *:= *([0-9]+)")
+    if(_l MATCHES "PLUS_VER_([A-Z]+) *:= *([0-9]+)")
         set(FW_VER_${CMAKE_MATCH_1} ${CMAKE_MATCH_2})
     endif()
 endforeach()
