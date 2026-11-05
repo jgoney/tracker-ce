@@ -595,6 +595,7 @@ enum SaturationType
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 #if defined(PLATFORM_APPLE)
+#include <cassert>
 // strInstrument is stored on disk as raw bytes and its sample.address slot is 4 bytes on the
 // hardware. A 64-bit host pointer would change the layout (and the project file format), so on the
 // host the slot holds a 4-byte handle into externalRamSampleMemory instead: 0 = nullptr, otherwise
