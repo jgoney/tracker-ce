@@ -112,7 +112,7 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
   2. A compile-time platform trait (`if constexpr`) when behaviour must differ.
   3. `#ifdef PLATFORM_APPLE` only where code can't compile on one side.
 
-  Core changes go in small, separate commits marked *neutral* or *hardware-visible*, so they could become upstream PRs. Hardware-visible ones need community testing first (`CONTRIBUTING.md` §4).
+  Core changes go in small, separate commits marked *neutral* or *hardware-visible*, so they could become upstream PRs. Hardware-visible ones need community testing first (`CONTRIBUTING.md` §4). The user can borrow a friend's Tracker for hardware testing, so hardware-visible changes are testable when needed. Batch them for a borrowing session.
 - **Audio interface:** Core Audio. **MIDI:** CoreMIDI. **Storage:** a folder on disk. *(My call, stated to the user.)*
 
 ## 6. Calls I made (the user should check these)
@@ -168,3 +168,4 @@ The entry points are in `core/include/Tracker.h`: `init()`, `update()` and `upda
 3. **Tracker ↔ Semaphore.** CC/NRPN mapping to Performer parameters on the Semaphore side, coordinated with the Semaphore firmware sessions.
 4. **Live buffer.** A rolling capture of an ES-8 input as an instrument, sliced and triggered by steps, with roll/stutter FX and a freeze control.
 5. **Open sound engines and AUv3 effects.**
+6. **base16 themes.** Tracker CE already has JSON colour themes (`/Themes/*.json`), custom `.ptfont` fonts and a web theme editor (`docs/custom_themes_and_fonts.md`). The Mac app inherits all of this from the core. The add-on is a base16 YAML → Tracker theme JSON converter, so any scheme from [tinted-theming/base16-schemes](https://github.com/tinted-theming/base16-schemes) works. That mirrors the user's WaveEdit fork (`~/dev/WaveEdit_clones/WaveEdit/src/theme.cpp`, `doc/maintenance/2026-04-09-themes-fonts-design.md`). Needs its own short design for the base16 → Tracker key mapping.

@@ -29,7 +29,7 @@
 - **Keep core changes hardware-safe and upstreamable.**
   - Each core change goes in its own small commit, prefixed `core:`, and is listed in `docs/apple_port.md` under "Core changes".
   - Each listed change is marked *neutral* (no effect on hardware binaries beyond strings/addresses) or *hardware-visible*.
-  - The user owns no Tracker hardware, so hardware-visible changes need community testing before any upstream PR (see `CONTRIBUTING.md` §4). Avoid them unless necessary.
+  - The user owns no Tracker hardware, so hardware-visible changes need community testing before any upstream PR (see `CONTRIBUTING.md` §4). Avoid them unless necessary. The user can borrow a friend's Tracker, so list each one with test steps for a batched hardware session.
 - Prefer leaving `core/interface/`, `core/libs/NewDisplay/` and `core/libs/FT812/` unchanged. The display design doesn't need to edit them. Edits there follow the policy above.
 - `make original`, `make plus` and `make mini` must still build after every task.
 - Never link `synth/lib/libPolySynth.a` or `libPolyDSP.a`. Never disassemble or inspect them. They're Cortex-M7 objects, unusable on the host. Stubs are written only from the MIT-licensed headers in `synth/include/PolySynth/` (`synth/lib/LICENSE-PROPRIETARY.txt` §3).
