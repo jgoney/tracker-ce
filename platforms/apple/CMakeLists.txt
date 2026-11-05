@@ -102,6 +102,7 @@ add_library(TrackerApple STATIC
     hal/StubsApple.cpp
     hal/interrupts_apple.cpp
     runtime/AudioRuntime.cpp
+    runtime/CoreAudioOutput.cpp
     display/Ft812Model.cpp
     display/CoproDecoder.cpp
     display/DlDecoder.cpp
@@ -111,7 +112,8 @@ add_library(TrackerApple STATIC
 target_include_directories(TrackerApple PUBLIC hal display runtime)
 # ImageIO/CoreGraphics: CMD_LOADIMAGE JPEG/PNG decoding only (also available on iOS).
 target_link_libraries(TrackerApple PUBLIC TrackerCore
-    "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
+    "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation"
+    "-framework CoreAudio" "-framework AudioToolbox")
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
 
@@ -127,6 +129,11 @@ target_compile_options(TrackerAllocGuard PRIVATE
 add_executable(runtime_tests tests/test_runtime.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
 target_compile_options(runtime_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(runtime_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# Core Audio output against real devices (tag [hardware]; label "hardware", needs an output device).
+add_executable(coreaudio_tests tests/test_coreaudio.cpp)
+target_compile_options(coreaudio_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(coreaudio_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
 
 # Whole-core headless boot + platform tests (smoke, boot, input, config, synth round trip).
 add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
@@ -159,3 +166,6 @@ add_test(NAME apple_tests COMMAND apple_tests)
 add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
 add_test(NAME display_tests COMMAND display_tests)
 add_test(NAME runtime_tests COMMAND runtime_tests)
+# Needs an audio output device: run with `ctest -L hardware`, skip with `ctest -LE hardware`.
+add_test(NAME coreaudio_tests COMMAND coreaudio_tests "[hardware]")
+set_tests_properties(coreaudio_tests PROPERTIES LABELS hardware)
