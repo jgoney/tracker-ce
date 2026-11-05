@@ -139,6 +139,7 @@ struct CoreAudioOutputTestHooks
     std::function<void(AudioDeviceID)> beforeStart;    // before AudioOutputUnitStart; may block forever
     std::function<bool(AudioDeviceID)> fakeOpen;       // true: build a HAL-less fake device for this id
     std::function<void(void*)> workgroupSink;          // replaces AudioRuntime::setWorkgroup
+    bool simulateIoProcAfterStart = false;             // fake devices run one real IOProc cycle when their start returns
 };
 
 struct CoreAudioOutputTestAccess

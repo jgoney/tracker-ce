@@ -39,11 +39,13 @@
 
 namespace
 {
+bool gFastExit = true; // --no-fast-exit: normal destruction and exit after a failed open
+
 int usage()
 {
     std::fprintf(stderr,
                  "usage: trackerce-headless --screenshot out.ppm [--updates N] [--interval-ms M] "
-                 "[--sd DIR] [--audio-seconds S] [--device ID] [--channels L,R]\n"
+                 "[--sd DIR] [--audio-seconds S] [--device ID] [--channels L,R] [--no-fast-exit]\n"
                  "       trackerce-headless --list-devices\n"
                  "       trackerce-headless --tone S [--device ID] [--channels L,R]\n");
     return 2;
@@ -91,7 +93,8 @@ bool openOutput(CoreAudioOutput& out, uint32_t deviceId, int l, int r)
         // The fallback (default output) is already running behind the failed open, and with a hung
         // driver the HAL may block its teardown too: a CLI that failed has nothing to clean up.
         std::fflush(nullptr);
-        _exit(1);
+        if (gFastExit)
+            _exit(1);
         return false;
     }
     std::printf("device %u: %.0f Hz%s, %u-frame buffer, latency %.2f ms\n",
@@ -158,6 +161,8 @@ int main(int argc, char** argv)
             audioSeconds = std::strtod(argv[++i], nullptr);
         else if (!std::strcmp(argv[i], "--tone") && hasValue)
             toneSeconds = std::strtod(argv[++i], nullptr);
+        else if (!std::strcmp(argv[i], "--no-fast-exit"))
+            gFastExit = false;
         else if (!std::strcmp(argv[i], "--list-devices"))
             listDevices = true;
         else if (!std::strcmp(argv[i], "--device") && hasValue)

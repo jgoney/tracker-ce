@@ -309,3 +309,28 @@ TEST_CASE("test_start_hang_falls_back_with_status", "[coreaudio]")
     out.reset();
     release->store(true);
 }
+
+// A device abandoned on a hung start must stop pulling from the ring: if the wedged start later
+// completes and its IOProc runs, it must not touch the runtime (nor the fallback device's data).
+TEST_CASE("test_abandoned_device_ioproc_never_pulls", "[coreaudio]")
+{
+    Fixture f;
+    f.rt.start(); // fills the ring (4 blocks) so any pull() would advance the read position
+    REQUIRE(waitUntil([&] { return f.rt.blocksRendered.load() >= 4; }, 2000ms));
+    auto release = std::make_shared<std::atomic<bool>>(false);
+    f.hooks.beforeStart = [release](AudioDeviceID id) { if (id == kA) blockUntil(release); };
+    f.hooks.simulateIoProcAfterStart = true;
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+    const size_t n = f.statusCount();
+    out->start(); // A's start wedges, the device is abandoned, D takes over
+    REQUIRE(waitUntil([&] { return f.statusCount() > n && out->deviceId() == kD; }, 6000ms));
+    // D (a fake) started and ran one simulated IOProc cycle of its own: that one is legitimate.
+    const size_t posBefore = f.rt.readPosition();
+    release->store(true); // the wedged start on A "completes" and A's IOProc cycle runs
+    std::this_thread::sleep_for(500ms);
+    REQUIRE(f.rt.readPosition() == posBefore); // abandoned A pulled nothing
+    out.reset();
+    f.rt.stop();
+}

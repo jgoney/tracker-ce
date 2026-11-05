@@ -725,6 +725,10 @@ CoreAudioOutput::Impl::Err CoreAudioOutput::Impl::build(AudioDeviceID id, uint8_
         d->sh = sh;
         d->onTeardown = th.beforeTeardown;
         d->channels = 2;
+        d->maxFrames = 1024;
+        d->srcCap = 1024;
+        d->srcL.assign(1024, 0.f);
+        d->srcR.assign(1024, 0.f);
         d->wg = (void*)(uintptr_t)id;
         d->rt.store(&rt);
         out = d;
@@ -976,14 +980,23 @@ bool CoreAudioOutput::Impl::install(std::shared_ptr<Dev> d, bool follow)
 
 void CoreAudioOutput::Impl::discard(std::shared_ptr<Dev> d)
 {
-    if (d && runTimed([d] { d->teardown(); }) == Timed::OpTimeout)
-        markUnresponsive(d->id);
+    if (!d)
+        return;
+    const Timed t = runTimed([d] { d->teardown(); });
+    if (t != Timed::Done)
+    {
+        d->rt.store(nullptr, std::memory_order_release); // abandoned untorn: keep its IOProc silent
+        if (t == Timed::OpTimeout)
+            markUnresponsive(d->id);
+    }
 }
 
 void CoreAudioOutput::Impl::abandonCur(const std::shared_ptr<Dev>& d)
 {
     // The op on `d` is wedged on an abandoned worker; the Dev stays owned by that op (and is
-    // leaked if it never returns). Nothing may tear it down inline.
+    // leaked if it never returns). Nothing may tear it down inline. Its IOProc, if the wedged
+    // start/stop later lets it run, must neither pull from the ring nor touch the runtime.
+    d->rt.store(nullptr, std::memory_order_release);
     std::lock_guard<std::mutex> g(mtx);
     if (cur == d)
         cur.reset();
@@ -1024,7 +1037,20 @@ bool CoreAudioOutput::Impl::syncRunState()
               if (h.beforeStart)
                   h.beforeStart(d->id);
               if (!d->unit)
+              {
                   d->started = true; // test fake
+                  if (h.simulateIoProcAfterStart)
+                  {
+                      // One real IOProc cycle, as when a wedged AudioOutputUnitStart finally
+                      // returns on a device that has been abandoned meanwhile.
+                      float buf[128 * 2];
+                      AudioBufferList abl;
+                      abl.mNumberBuffers = 1;
+                      abl.mBuffers[0] = { 2, sizeof buf, buf };
+                      AudioTimeStamp ts{};
+                      renderCb(d.get(), nullptr, &ts, 0, 128, &abl);
+                  }
+              }
               else if (AudioOutputUnitStart(d->unit) == noErr)
               {
                   sh->lastCycleNs.store(nowNs());
@@ -1269,6 +1295,7 @@ CoreAudioOutput::CoreAudioOutput(AudioRuntime& runtime) : impl_(std::make_shared
 CoreAudioOutput::~CoreAudioOutput()
 {
     Impl& i = *impl_;
+    i.sh->cycleEnabled = false; // first: onCycle is never called again, whatever the waits below do
     std::shared_ptr<Dev> d;
     {
         std::lock_guard<std::mutex> g(i.mtx);
@@ -1285,7 +1312,6 @@ CoreAudioOutput::~CoreAudioOutput()
     // Fence: the shutdown command runs after whatever the control queue is doing (which stands
     // down at its next step because `dying` is set). Wait for it at most 2 s.
     const bool ok = i.runCmd([&i] { i.cmdShutdown(); return true; }, kOpTimeout, true);
-    i.sh->cycleEnabled = false; // an abandoned device's IOProc may still run: it must not call onCycle
     (void)ok;
     // else: a HAL call is wedged (or the queue is slow). Do not wait for it at quit: the queued
     // work only touches the Impl, which stays alive until it is done (a deliberate leak if wedged).
