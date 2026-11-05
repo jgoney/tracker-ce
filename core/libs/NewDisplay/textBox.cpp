@@ -209,7 +209,7 @@ int16_t cTextBox::getNextLineLength()
          whiteCharCounter++)
     {
 
-        char* enter_pos = strchr(temp_pos, '\n');
+        const char* enter_pos = strchr(temp_pos, '\n');
         bool enterNotFound = (enter_pos == nullptr);
         enterPositionIdx =
           last_length + (enterNotFound ? (strlen(position)) : (uint16_t)(enter_pos - temp_pos));
@@ -217,7 +217,7 @@ int16_t cTextBox::getNextLineLength()
         if (!enterPositionIdx)
             return 0;
 
-        char* space_pos = strchr(temp_pos, ' ');
+        const char* space_pos = strchr(temp_pos, ' ');
         bool spaceNotFound = (space_pos == nullptr);
         spacePositionIdx =
           last_length + (spaceNotFound ? (strlen(position)) : (uint16_t)(space_pos - temp_pos));
