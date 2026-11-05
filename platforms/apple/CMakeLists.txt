@@ -78,3 +78,23 @@ target_compile_definitions(dsp_tests PRIVATE PLATFORM_APPLE)
 target_compile_options(dsp_tests PRIVATE -std=gnu++20 -fsanitize=undefined -fno-sanitize-recover=all)
 target_link_options(dsp_tests PRIVATE -fsanitize=undefined)
 target_link_libraries(dsp_tests PRIVATE catch2_vendored)
+
+# --- fmt (vendored sources; core and the PolySynth SDK headers call fmt::format) ---
+add_library(fmt_vendored STATIC ${REPO_ROOT}/util/3rdparty/fmt/format.cc)
+target_include_directories(fmt_vendored PUBLIC ${REPO_ROOT}/util/3rdparty)
+target_compile_options(fmt_vendored PRIVATE -std=gnu++20 -w)
+target_link_libraries(TrackerCore PUBLIC fmt_vendored)
+
+# --- Silent PolySynth / ptfx stand-ins (see synth_stub/) ---
+add_library(PolySynthStub STATIC
+    synth_stub/PolySynthStub.cpp
+    synth_stub/PtfxStub.cpp)
+target_link_libraries(PolySynthStub PUBLIC TrackerCore)
+target_compile_options(PolySynthStub PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;SHELL:-include cstdint;SHELL:-include cassert>")
+
+add_executable(synth_stub_tests tests/test_synth_stub.cpp)
+target_compile_options(synth_stub_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(synth_stub_tests PRIVATE PolySynthStub TrackerCore catch2_vendored)
+# test_link_stubs.cpp: TEMPORARY platform-symbol stand-ins until Task 4 (HAL) lands.
+target_sources(synth_stub_tests PRIVATE tests/test_link_stubs.cpp)
