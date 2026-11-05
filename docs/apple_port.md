@@ -2,8 +2,7 @@
 
 ## Core changes
 
-Changes to `core/` made for the Apple host build. *neutral* means the hardware build output is unchanged
-(verified by comparing the debug-stripped objects of `make original plus mini` against `main`).
+Changes to `core/` made for the Apple host build. *neutral* means the hardware code is unchanged. Verification so far: `core/` objects only (`make -C core build` for MK66/ORIGINAL, IMX/PLUS, IMX/MINI) built on `main` and on this branch with a shimmed GCC 15.3 (the only runnable arm toolchain here), debug info stripped: 697 of 699 objects identical, the exception being `synth/Synth.o` as expected. The full `make original plus mini` build and `cmp` of the images with GCC 10.3 is still pending (needs Rosetta or the `agt` toolchain).
 
 - `core: add PlatformTraits.h (platform::kIsApple)` - *neutral* (new header, unused on hardware).
 - `core: host stubs for interrupt control and ELF section macros under PLATFORM_APPLE` (`config.h`, `cr_section_macros.h`) - *neutral*.

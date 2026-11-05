@@ -70,3 +70,11 @@ target_compile_options(catch2_vendored PRIVATE -std=gnu++20 -w)
 add_executable(apple_tests EXCLUDE_FROM_ALL tests/test_smoke.cpp)
 target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(apple_tests PRIVATE TrackerCore catch2_vendored)
+
+# dspinst.h host intrinsics: header + Catch2 only, built under UBSan (no recovery).
+add_executable(dsp_tests tests/test_dspinst.cpp)
+target_include_directories(dsp_tests PRIVATE ${CORE_DIR}/libs/Audio/utility)
+target_compile_definitions(dsp_tests PRIVATE PLATFORM_APPLE)
+target_compile_options(dsp_tests PRIVATE -std=gnu++20 -fsanitize=undefined -fno-sanitize-recover=all)
+target_link_options(dsp_tests PRIVATE -fsanitize=undefined)
+target_link_libraries(dsp_tests PRIVATE catch2_vendored)
