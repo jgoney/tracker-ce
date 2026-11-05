@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -53,6 +54,10 @@ class Ft812Model : public DisplayDriver
     void stopStreamDma() override;
 
     // --- host side ---
+    // CMD_SNAPSHOT2: renders `rect` (screen pixels) into RAM_G at `addr` in format `fmt` and
+    // returns true. Unset or returning false: the model fills the area black.
+    std::function<bool(Rect rect, uint32_t addr, uint32_t fmt)> snapshotHook;
+
     bool powered() const { return powered_; }
     int brightness() const { return brightness_; }
     int rotation() const { return rotation_; }
@@ -73,6 +78,13 @@ class Ft812Model : public DisplayDriver
     void noteWrite(uint32_t addr, uint32_t len);
     uint32_t& dlOffset() { return dlOffset_; }
     uint8_t* ramDlMutable() { return ramDl_.data(); }
+    // CMD_LOADIMAGE result, returned by CMD_GETPROPS / getImgProps.
+    void setImgProps(uint32_t endAddr, uint32_t width, uint32_t height)
+    {
+        imgEnd_ = endAddr;
+        imgWidth_ = width;
+        imgHeight_ = height;
+    }
     // Decodes ram_dl and publishes the frame (CMD_SWAP).
     void swap();
 
@@ -98,6 +110,8 @@ class Ft812Model : public DisplayDriver
     uint32_t streamDest_ = 0;
     uint32_t streamSize_ = 0;
     bool streamInit_ = false;
+
+    uint32_t imgEnd_ = 0, imgWidth_ = 0, imgHeight_ = 0;
 
     bool powered_ = false;
     int brightness_ = 0;

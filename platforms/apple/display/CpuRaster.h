@@ -1,7 +1,7 @@
 #pragma once
 // Reference rasteriser for a decoded Frame: slow, straightforward EVE primitive semantics
-// (see INVENTORY.md). Ground truth for the Metal renderer. Bitmaps are placeholder outlines
-// until Task 5b.
+// (see INVENTORY.md). Ground truth for the Metal renderer. Bitmap texels are read from the
+// model's RAM_G at render time.
 #include "Frame.h"
 
 #include <cstdint>

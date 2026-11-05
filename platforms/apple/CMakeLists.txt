@@ -104,9 +104,13 @@ add_library(TrackerApple STATIC
     display/Ft812Model.cpp
     display/CoproDecoder.cpp
     display/DlDecoder.cpp
-    display/CpuRaster.cpp)
+    display/CpuRaster.cpp
+    display/Bitmaps.cpp
+    display/ImageDecode.cpp)
 target_include_directories(TrackerApple PUBLIC hal display)
-target_link_libraries(TrackerApple PUBLIC TrackerCore)
+# ImageIO/CoreGraphics: CMD_LOADIMAGE JPEG/PNG decoding only (also available on iOS).
+target_link_libraries(TrackerApple PUBLIC TrackerCore
+    "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
 
@@ -136,4 +140,6 @@ add_test(NAME dsp_tests COMMAND dsp_tests)
 add_test(NAME synth_stub_tests COMMAND synth_stub_tests)
 add_test(NAME filesystem_tests COMMAND filesystem_tests)
 add_test(NAME apple_tests COMMAND apple_tests)
+# Wall-clock boot to the main UI (~4 s), alone in its own process; hidden from apple_tests.
+add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
 add_test(NAME display_tests COMMAND display_tests)

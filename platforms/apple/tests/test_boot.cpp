@@ -316,15 +316,17 @@ TEST_CASE("stack watermark symbols bound a real region")
     (void)probe;
 }
 
-// Declared last on purpose (Catch2 runs in declaration order): once the main UI is up, the
-// pattern editor consumes file-manager end states (fPatternEdit.cpp update), which the synth
-// round-trip test above polls for.
-TEST_CASE("boot produces frames")
+// Hidden ([.boot]) so the plain apple_tests run skips it: ctest runs it alone in its own process
+// (apple_boot_frames), so it boots a fresh core and does not depend on what other tests did to
+// the file manager (the synth round trip clears statuses the start screen waits for, and once
+// the main UI is up the pattern editor consumes the round trip's end states).
+TEST_CASE("boot produces frames", "[.boot]")
 {
     auto& b = booted();
     // The start screen leaves only when it sees fmLoadEnd (interfaceMisc.cpp
-    // detectProjectLoadState); the round-trip test cleared that status. Reopen the workspace
-    // project so it arrives again (a no-op unless the file manager is idle).
+    // detectProjectLoadState). Ask for the workspace project explicitly so the test does not rely
+    // on what ran before it if it is ever selected together with other tests (a no-op unless the
+    // file manager is idle).
     newFileManager.openProjectFromWorkspace();
     // The UI is wall-clock driven: the start screen (logo + progress bar, 2 prims) stays up for
     // at least ~2 s (interfaceMisc.cpp refreshStartScreen: 40 ms ticks, progress capped at

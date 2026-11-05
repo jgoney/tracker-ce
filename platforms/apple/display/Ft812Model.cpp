@@ -17,10 +17,10 @@ Ft812Model::~Ft812Model() = default;
 
 void Ft812Model::getImgProps(uint32_t& addr, uint32_t& width, uint32_t& height)
 {
-    // CMD_GETPROPS results arrive with CMD_LOADIMAGE support (Task 5b).
-    addr = 0;
-    width = 0;
-    height = 0;
+    // CMD_GETPROPS: end address, width and height of the last CMD_LOADIMAGE.
+    addr = imgEnd_;
+    width = imgWidth_;
+    height = imgHeight_;
 }
 
 // ---- command stream ----

@@ -23,6 +23,13 @@ class DlDecoder
     };
     static constexpr int kHandles = 32;
 
+    // Model-private display-list instruction for CMD_GRADIENT (opcode 0x3E is unused by FT81x and
+    // BT81x): the header word (kGradientOp << 24) | 4 is followed by the command's four argument
+    // words verbatim: (y0 << 16 | x0), rgb0, (y1 << 16 | x1), rgb1. Decodes to a Gradient prim
+    // over the current scissor.
+    static constexpr uint32_t kGradientOp = 0x3E;
+    static constexpr uint32_t kGradientHeader = (kGradientOp << 24) | 4;
+
     // Decodes words from `dl` (byte size `bytes`, little endian) until DISPLAY or the end.
     // `out.prims` and `out.clearColor` are overwritten; `out.serial` is left alone.
     void decode(const uint8_t* dl, size_t bytes, Frame& out);

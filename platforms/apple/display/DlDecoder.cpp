@@ -99,6 +99,7 @@ class Decoder
     bool sameState(const Prim& p) const;
     void vertex(Vec2 v, uint32_t handle, uint32_t cell);
     void clear(uint32_t w);
+    void gradient(const uint32_t* args);
 
     DlDecoder::HandleRegs* handles_;
     Frame& out_;
@@ -114,8 +115,8 @@ Prim Decoder::templ(Prim::Kind kind) const
     Prim p;
     p.kind = kind;
     p.rgba = rgba();
-    p.lineWidthPx = float(c_.lineWidth) / 16.0f;
-    p.pointSizePx = float(c_.pointSize) / 16.0f;
+    p.lineRadiusPx = float(c_.lineWidth) / 16.0f;
+    p.pointRadiusPx = float(c_.pointSize) / 16.0f;
     p.scissor = c_.scissor;
     p.blend = c_.blend;
     switch (begin_)
@@ -130,8 +131,8 @@ Prim Decoder::templ(Prim::Kind kind) const
 
 bool Decoder::sameState(const Prim& p) const
 {
-    return p.rgba == rgba() && p.lineWidthPx == float(c_.lineWidth) / 16.0f &&
-           p.pointSizePx == float(c_.pointSize) / 16.0f && p.scissor == c_.scissor &&
+    return p.rgba == rgba() && p.lineRadiusPx == float(c_.lineWidth) / 16.0f &&
+           p.pointRadiusPx == float(c_.pointSize) / 16.0f && p.scissor == c_.scissor &&
            p.blend == c_.blend;
 }
 
@@ -228,11 +229,30 @@ void Decoder::clear(uint32_t w)
     Prim p;
     p.kind = Prim::Rects;
     p.rgba = color;
-    p.lineWidthPx = 0;
-    p.pointSizePx = 0;
+    p.lineRadiusPx = 0;
+    p.pointRadiusPx = 0;
     p.scissor = s;
     p.blend = BlendMode{ ONE, ZERO };
     p.verts = { Vec2{ float(s.x), float(s.y) }, Vec2{ float(s.x + s.w), float(s.y + s.h) } };
+    out_.prims.push_back(std::move(p));
+    open_ = false;
+}
+
+void Decoder::gradient(const uint32_t* args)
+{
+    auto point = [](uint32_t xy) {
+        return Vec2{ float(int16_t(uint16_t(xy))), float(int16_t(uint16_t(xy >> 16))) };
+    };
+    // Gradient colours are opaque RGB (the 24-bit arguments); blend and scissor from the context.
+    Prim p;
+    p.kind = Prim::Gradient;
+    p.rgba = (args[1] << 8) | 0xFF;
+    p.rgba2 = (args[3] << 8) | 0xFF;
+    p.lineRadiusPx = 0;
+    p.pointRadiusPx = 0;
+    p.scissor = c_.scissor;
+    p.blend = c_.blend;
+    p.verts = { point(args[0]), point(args[2]) };
     out_.prims.push_back(std::move(p));
     open_ = false;
 }
@@ -389,6 +409,23 @@ void Decoder::run(const uint8_t* dl, size_t bytes)
             case OpPaletteSource: c_.palette = w & 0x3FFFFF; break;
             case OpVertexTranslateX: c_.translateX = signExtend(w, 17); break;
             case OpVertexTranslateY: c_.translateY = signExtend(w, 17); break;
+            case DlDecoder::kGradientOp:
+            {
+                const size_t n = w & 0xFF;
+                if (n == 4 && pc + 4 <= words)
+                {
+                    uint32_t args[4];
+                    for (size_t i = 0; i < 4; i++)
+                    {
+                        const uint8_t* q = dl + (pc + i) * 4;
+                        args[i] = uint32_t(q[0]) | (uint32_t(q[1]) << 8) |
+                                  (uint32_t(q[2]) << 16) | (uint32_t(q[3]) << 24);
+                    }
+                    gradient(args);
+                }
+                pc += n;
+                break;
+            }
             case OpNop:
             default: break;
         }

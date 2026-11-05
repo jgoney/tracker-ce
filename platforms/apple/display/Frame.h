@@ -47,7 +47,8 @@ struct Prim
         LineStrip, // connected
         EdgeStrip, // edge: one of EdgeR/L/A/B
         Rects,     // vertex pairs (opposite corners)
-        Bitmap     // one vertex = top-left of one bitmap cell
+        Bitmap,    // one vertex = top-left of one bitmap cell
+        Gradient   // CMD_GRADIENT: verts[0] (rgba) to verts[1] (rgba2), fills the scissor
     } kind = Points;
     enum Edge
     {
@@ -58,8 +59,9 @@ struct Prim
     } edge = EdgeR;
 
     uint32_t rgba = 0xFFFFFFFF; // 0xRRGGBBAA
-    float lineWidthPx = 1;      // LINE_WIDTH / 16: line radius, rect corner radius
-    float pointSizePx = 1;      // POINT_SIZE / 16: point radius
+    uint32_t rgba2 = 0;         // Gradient only: colour at verts[1]
+    float lineRadiusPx = 1;     // LINE_WIDTH / 16: line radius, rect corner radius
+    float pointRadiusPx = 1;    // POINT_SIZE / 16: point radius
     Rect scissor{ 0, 0, 2048, 2048 };
     BlendMode blend;
     std::vector<Vec2> verts; // px
