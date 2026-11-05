@@ -26,7 +26,7 @@
 // After the destructor returns, no callback (onStatus) fires and the AudioRuntime is not used.
 //
 // FALLBACK. If the device dies (DeviceIsAlive, vanishes from the device list, or the IOProc
-// stalls for 1 s while running), or an open fails or times out, the output moves to the system
+// stalls for 1 s while running; 5 s from the start until the first cycle), or an open fails or times out, the output moves to the system
 // default output, then to the built-in output device, restarting if it was running. This runs
 // on an internal serial queue (never the IO thread, never the caller); open() itself only tries
 // the requested device and returns false when that fails, then the fallback follows and is
@@ -117,6 +117,10 @@ class CoreAudioOutput
       std::function<void(uint64_t hostTimeOfFirstFrame, uint64_t blockIndex, size_t offsetInBlock)>
         fn);
 
+    // Disables the onCycle callback for good without touching the std::function: safe while an
+    // IOProc may still be running (setOnCycle is not). A later setOnCycle re-enables it.
+    void clearOnCycle();
+
     // Fires on the internal control queue (never the IO thread), possibly from a different
     // thread than the caller's.
     void setOnStatus(std::function<void(Status, std::string deviceName)> fn);
@@ -139,6 +143,7 @@ struct CoreAudioOutputTestHooks
     std::function<void(AudioDeviceID)> beforeStart;    // before AudioOutputUnitStart; may block forever
     std::function<bool(AudioDeviceID)> fakeOpen;       // true: build a HAL-less fake device for this id
     std::function<void(void*)> workgroupSink;          // replaces AudioRuntime::setWorkgroup
+    bool watchdogOnFakes = false;                      // run the stall watchdog on fake devices too
     bool simulateIoProcAfterStart = false;             // fake devices run one real IOProc cycle when their start returns
 };
 
@@ -148,6 +153,7 @@ struct CoreAudioOutputTestAccess
     // Same path as the HAL listener callbacks: queue hop, then the handler.
     static void postDeviceDead(CoreAudioOutput& o);
     static void postDevicesChanged(CoreAudioOutput& o);
+    static void injectCycle(CoreAudioOutput& o); // as if the IOProc had just run (liveness only)
     static void freezeWatchdogClock(CoreAudioOutput& o, bool freeze); // IOProc stops reporting liveness
     static bool isUnresponsive(CoreAudioOutput& o, AudioDeviceID id);
 };

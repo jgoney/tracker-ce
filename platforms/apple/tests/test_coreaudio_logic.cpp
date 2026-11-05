@@ -334,3 +334,27 @@ TEST_CASE("test_abandoned_device_ioproc_never_pulls", "[coreaudio]")
     out.reset();
     f.rt.stop();
 }
+
+// A slow-starting device (Bluetooth profile switch, AirPlay) delivers its first IOProc cycle
+// seconds after start: it must not be declared dead before the 5 s first-cycle grace ends. Once
+// cycles flow, a 1 s silence is a stall again.
+TEST_CASE("test_slow_first_cycle_does_not_fall_back", "[coreaudio]")
+{
+    Fixture f;
+    f.hooks.watchdogOnFakes = true;
+    auto out = std::make_unique<CoreAudioOutput>(f.rt);
+    f.attach(*out);
+    REQUIRE(out->open(kA));
+    REQUIRE(out->start());
+    const size_t n = f.statusCount();
+    std::this_thread::sleep_for(2000ms); // no cycle yet: past the old 1 s limit
+    REQUIRE(out->deviceId() == kA);
+    REQUIRE(f.statusCount() == n); // no FellBack
+    CoreAudioOutputTestAccess::injectCycle(*out); // the first cycle arrives at 2 s
+    std::this_thread::sleep_for(700ms);
+    REQUIRE(out->deviceId() == kA);
+    // ...and then no more cycles: the 1 s stall limit applies.
+    REQUIRE(waitUntil([&] { return f.statusCount() > n && f.lastStatus() == Status::FellBack; }, 3000ms));
+    REQUIRE(out->deviceId() == kD);
+    out.reset();
+}

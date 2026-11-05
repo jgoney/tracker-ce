@@ -19,7 +19,10 @@ using namespace std::chrono_literals;
 
 constexpr auto kOpTimeout = 2000ms;
 constexpr UInt32 kWantedBufferFrames = 256; // ring is 4 blocks (512 frames): keep well inside it
-constexpr uint64_t kStallNs = 1000000000ull; // running with no IOProc cycle for this long = dead
+constexpr uint64_t kStallNs = 1000000000ull; // started, cycles seen, then none for this long = dead
+// Slow-starting devices (Bluetooth profile switch, AirPlay) may take seconds to deliver the first
+// IOProc cycle: until one arrives the watchdog allows this long from the start.
+constexpr uint64_t kFirstCycleGraceNs = 5000000000ull;
 
 uint64_t nowNs()
 {
@@ -155,7 +158,8 @@ struct Shared
 {
     std::atomic<uint64_t> cycles{ 0 };
     std::atomic<uint64_t> reopens{ 0 };
-    std::atomic<uint64_t> lastCycleNs{ 0 };
+    std::atomic<uint64_t> lastCycleNs{ 0 }; // 0 = no IOProc cycle since the last start
+    std::atomic<uint64_t> startNs{ 0 };     // when the current start was issued
     std::atomic<bool> cycleEnabled{ true }; // cleared by the destructor: onCycle is never called after
     std::atomic<bool> freezeClock{ false }; // test: the IOProc stops reporting liveness
     std::function<void(uint64_t, uint64_t, size_t)> onCycle;
@@ -1034,6 +1038,8 @@ bool CoreAudioOutput::Impl::syncRunState()
               return;
           if (want)
           {
+              sh->lastCycleNs.store(0); // the first-cycle grace applies from here
+              sh->startNs.store(nowNs());
               if (h.beforeStart)
                   h.beforeStart(d->id);
               if (!d->unit)
@@ -1053,7 +1059,6 @@ bool CoreAudioOutput::Impl::syncRunState()
               }
               else if (AudioOutputUnitStart(d->unit) == noErr)
               {
-                  sh->lastCycleNs.store(nowNs());
                   d->started = true;
               }
           }
@@ -1177,12 +1182,13 @@ void CoreAudioOutput::Impl::reopenSame(uint64_t gen)
 void CoreAudioOutput::Impl::handleEvent(Event ev)
 {
     std::shared_ptr<Dev> d;
-    bool wasRunning, follow, want;
+    bool wasRunning, follow, want, watchFakes;
     uint64_t gen;
     {
         std::lock_guard<std::mutex> g(mtx);
         if (dying)
             return;
+        watchFakes = hooks.watchdogOnFakes;
         d = cur;
         wasRunning = running;
         follow = following;
@@ -1221,8 +1227,15 @@ void CoreAudioOutput::Impl::handleEvent(Event ev)
             fallback(kAudioObjectUnknown, gen);
             break;
         case Event::Watchdog:
-            if (d && !d->fake && wasRunning && d->started.load() && nowNs() - sh->lastCycleNs.load() > kStallNs)
-                fallback(d->id, gen);
+            if (d && (!d->fake || watchFakes) && wasRunning && d->started.load())
+            {
+                const uint64_t now = nowNs();
+                const uint64_t last = sh->lastCycleNs.load();
+                const uint64_t start = sh->startNs.load();
+                const bool stalled = last == 0 ? now - start > kFirstCycleGraceNs : now - last > kStallNs;
+                if (stalled)
+                    fallback(d->id, gen);
+            }
             break;
     }
 }
@@ -1320,6 +1333,14 @@ CoreAudioOutput::~CoreAudioOutput()
 void CoreAudioOutput::setOnCycle(std::function<void(uint64_t, uint64_t, size_t)> fn)
 {
     impl_->sh->onCycle = std::move(fn);
+    impl_->sh->cycleEnabled.store(true, std::memory_order_release);
+}
+
+void CoreAudioOutput::clearOnCycle()
+{
+    // Never touches the std::function (an IOProc may be running, e.g. after a stop() that timed
+    // out): the gate alone makes the IOProc skip it. The function is released with the output.
+    impl_->sh->cycleEnabled.store(false, std::memory_order_release);
 }
 
 void CoreAudioOutput::setOnStatus(std::function<void(Status, std::string)> fn)
@@ -1443,6 +1464,11 @@ void CoreAudioOutputTestAccess::postDeviceDead(CoreAudioOutput& o)
 void CoreAudioOutputTestAccess::postDevicesChanged(CoreAudioOutput& o)
 {
     o.impl_->postEvent(Event::DevicesChanged);
+}
+
+void CoreAudioOutputTestAccess::injectCycle(CoreAudioOutput& o)
+{
+    o.impl_->sh->lastCycleNs.store(nowNs());
 }
 
 void CoreAudioOutputTestAccess::freezeWatchdogClock(CoreAudioOutput& o, bool freeze)

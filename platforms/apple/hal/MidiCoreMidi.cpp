@@ -376,7 +376,7 @@ void MidiCoreMidi::attachOutput(CoreAudioOutput& out)
 
 void MidiCoreMidi::detachOutput(CoreAudioOutput& out)
 {
-    out.setOnCycle(nullptr);
+    out.clearOnCycle();
     std::lock_guard<std::mutex> g(hub_->ctlMutex);
     if (hub_->out == &out)
         hub_->out = nullptr;
