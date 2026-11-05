@@ -352,6 +352,9 @@ MidiCoreMidi::DestinationInfo parseMidiKey(const std::string& key)
             if (n->messageID == kMIDIMsgSetupChanged)
                 [weak devicesChanged];
         });
+        // A run loop with no sources returns from CFRunLoopRunInMode at once, which turned this
+        // loop into a busy spin (a full core). A port that never fires keeps it sleeping.
+        [[NSRunLoop currentRunLoop] addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode];
         for (;;)
         {
             TCBridge* me = weak;
