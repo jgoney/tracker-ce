@@ -83,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let s = value("--quit-after"), let t = Double(s) {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) {
                 print("underruns: \(model.bridge.underruns)")
+                let now = model.bridge.takeTimingMaxUs().map { $0.uint32Value }
+                let peak = zip(model.timingPeak, now).map { max($0, $1) }
+                print("peak us: suspend \(peak[0]) render \(peak[1]) mask \(peak[2]) (budget 2900)")
                 NSApp.terminate(nil)
             }
         }

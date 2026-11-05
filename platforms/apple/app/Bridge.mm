@@ -446,6 +446,13 @@ MidiCoreMidi::DestinationInfo parseMidiKey(const std::string& key)
 
 - (uint64_t)underruns { return _rt ? _rt->underruns.load() : 0; }
 - (uint64_t)blocksRendered { return _rt ? _rt->blocksRendered.load() : 0; }
+- (NSArray<NSNumber*>*)takeTimingMaxUs
+{
+    if (!_rt)
+        return @[ @0, @0, @0 ];
+    return @[ @(AudioRuntime::takeMax(_rt->maxSuspendUs)), @(AudioRuntime::takeMax(_rt->maxRenderUs)),
+              @(AudioRuntime::takeMax(_rt->maxMaskWaitUs)) ];
+}
 - (double)outputLatencyMs { return _out ? _out->outputLatencySeconds() * 1000.0 : 0; }
 
 - (void)drawInEncoder:(id<MTLRenderCommandEncoder>)e size:(CGSize)s

@@ -90,6 +90,10 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("underruns: \(m.underruns)").foregroundStyle(m.underruns == 0 ? Color.green : Color.red)
                     Text("blocks: \(m.blocks)   latency: \(String(format: "%.1f", m.latencyMs)) ms")
+                    Text("µs now/peak (budget 2900)")
+                    Text("  render  \(m.timingNow[1]) / \(m.timingPeak[1])")
+                    Text("  suspend \(m.timingNow[0]) / \(m.timingPeak[0])")
+                    Text("  mask    \(m.timingNow[2]) / \(m.timingPeak[2])")
                     Text(m.audioStatus)
                 }
                 .font(.system(size: 11, design: .monospaced)).padding(6)

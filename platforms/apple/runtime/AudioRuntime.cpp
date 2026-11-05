@@ -35,6 +35,24 @@ void writeStderr(const char* msg)
     (void)r;
 }
 
+uint32_t absToUs(uint64_t abs)
+{
+    static mach_timebase_info_data_t tb = [] {
+        mach_timebase_info_data_t t;
+        mach_timebase_info(&t);
+        return t;
+    }();
+    return (uint32_t)(abs * tb.numer / tb.denom / 1000);
+}
+
+void raiseMax(std::atomic<uint32_t>& a, uint32_t v)
+{
+    uint32_t cur = a.load(std::memory_order_relaxed);
+    while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed))
+    {
+    }
+}
+
 uint64_t nsToAbs(uint64_t ns)
 {
     mach_timebase_info_data_t tb;
@@ -204,7 +222,9 @@ void AudioRuntime::renderMain()
                 pendingIrq_.store(true);
                 if (gIrqDepth.load() > 0 || !pendingIrq_.exchange(false))
                 {
+                    const uint64_t t0 = mach_absolute_time();
                     semaphore_wait(irqEnabledSem_);
+                    raiseMax(maxMaskWaitUs, absToUs(mach_absolute_time() - t0));
                     servicingPending_ = true;
                     continue; // re-check space, stop and depth
                 }
@@ -238,7 +258,10 @@ bool AudioRuntime::waitForSpace()
 void AudioRuntime::renderOneBlock()
 {
     // Freeze the main loop: thread_suspend returns once the tracker thread is off-CPU.
+    const uint64_t t0 = mach_absolute_time();
     const kern_return_t kr = thread_suspend(trackerPort_);
+    const uint64_t t1 = mach_absolute_time();
+    raiseMax(maxSuspendUs, absToUs(t1 - t0));
     if (kr != KERN_SUCCESS)
     {
         static bool reported = false;
@@ -260,6 +283,7 @@ void AudioRuntime::renderOneBlock()
     tracker_->updateInputAudioBuffers(zeroI2s_, zeroUsb_, (int)kBlockFrames); // as on IMX
     tracker_->updateAudioBuffers(blockL_, blockR_, (int)kBlockFrames);
     TimerApple::endBlock();
+    raiseMax(maxRenderUs, absToUs(mach_absolute_time() - t1));
 
     if (kr == KERN_SUCCESS)
         thread_resume(trackerPort_);

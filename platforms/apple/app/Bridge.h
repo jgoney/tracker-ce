@@ -65,6 +65,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint64_t underruns;
 @property(nonatomic, readonly) uint64_t blocksRendered;
 @property(nonatomic, readonly) double outputLatencyMs;
+// Worst render-thread stage times (µs) since the previous call: [suspend, render, maskWait].
+- (NSArray<NSNumber*>*)takeTimingMaxUs;
 
 - (void)drawInEncoder:(id<MTLRenderCommandEncoder>)e size:(CGSize)s;
 /// Renders the latest frame offscreen to a PNG (800x480 x scale). False if there is no frame.

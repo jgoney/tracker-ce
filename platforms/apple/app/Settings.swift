@@ -18,6 +18,9 @@ final class AppModel: ObservableObject {
     @Published var showKeyMap = false
     @Published var showDebug = false
     @Published var underruns: UInt64 = 0
+    // Worst stage times (µs): last 0.25 s and since launch. [suspend, render, maskWait]
+    @Published var timingNow: [UInt32] = [0, 0, 0]
+    @Published var timingPeak: [UInt32] = [0, 0, 0]
     @Published var blocks: UInt64 = 0
     @Published var latencyMs: Double = 0
 
@@ -67,6 +70,9 @@ final class AppModel: ObservableObject {
             self.underruns = self.bridge.underruns
             self.blocks = self.bridge.blocksRendered
             self.latencyMs = self.bridge.outputLatencyMs
+            let t = self.bridge.takeTimingMaxUs().map { $0.uint32Value }
+            self.timingNow = t
+            self.timingPeak = zip(self.timingPeak, t).map { max($0, $1) }
         }
     }
 

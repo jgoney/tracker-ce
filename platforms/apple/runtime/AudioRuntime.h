@@ -60,6 +60,13 @@ class AudioRuntime
     std::atomic<uint64_t> underruns{ 0 };
     std::atomic<uint64_t> blocksRendered{ 0 };
 
+    // Underrun diagnostics: worst case (µs) since the last takeMax(), per render-thread stage.
+    // Budget per block is ~2900 µs at 44.1 kHz.
+    std::atomic<uint32_t> maxSuspendUs{ 0 };  // thread_suspend of the tracker thread
+    std::atomic<uint32_t> maxRenderUs{ 0 };   // core updateAudioBuffers
+    std::atomic<uint32_t> maxMaskWaitUs{ 0 }; // waiting for the tracker to unmask interrupts
+    static uint32_t takeMax(std::atomic<uint32_t>& a) { return a.exchange(0, std::memory_order_relaxed); }
+
     // Render thread, after each block is in the ring (Task 8). Must be real-time safe. Set it
     // before start().
     std::function<void(uint64_t blockIndex)> onBlockRendered;
