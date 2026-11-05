@@ -6,6 +6,9 @@
 namespace
 {
 thread_local uint32_t tlSubBlockOffsetUs = 0;
+thread_local bool tlInBlock = false;
+thread_local uint64_t tlBlockIndex = 0;
+thread_local uint64_t tlFrozenNs = 0;
 
 uint64_t machNs()
 {
@@ -22,6 +25,8 @@ TimerApple::TimerApple() : startNs_(machNs()) {}
 
 uint64_t TimerApple::nowNs() const
 {
+    if (tlInBlock)
+        return tlFrozenNs;
     return machNs() - startNs_;
 }
 
@@ -58,4 +63,31 @@ void TimerApple::scheduleMidiClockUs(uint32_t delayUs, void (*callback)())
 uint32_t TimerApple::currentSubBlockOffsetUs()
 {
     return tlSubBlockOffsetUs;
+}
+
+uint64_t TimerApple::blockStartUs(uint64_t blockIndex)
+{
+    return blockIndex * 128ull * 1000000ull / 44100ull;
+}
+
+void TimerApple::beginBlock(uint64_t blockIndex)
+{
+    tlBlockIndex = blockIndex;
+    tlFrozenNs = blockIndex * 128ull * 1000000000ull / 44100ull;
+    tlInBlock = true;
+}
+
+void TimerApple::endBlock()
+{
+    tlInBlock = false;
+}
+
+bool TimerApple::inBlock()
+{
+    return tlInBlock;
+}
+
+uint64_t TimerApple::currentBlockIndex()
+{
+    return tlBlockIndex;
 }

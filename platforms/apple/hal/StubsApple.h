@@ -91,41 +91,6 @@ class UsbAudioApple : public UsbAudio
     void finishFillData() override {}
 };
 
-// MIDI ports are inert here; real CoreMIDI ports replace them in a later task.
-class UartMidiApple : public UartMidi
-{
-  public:
-    bool isReadAvailable() override { return false; }
-    void read() override {}
-    void sendRealTime(MessageType) override {}
-    void sendControlChange(uint8_t, uint8_t, uint8_t) override {}
-    void sendProgramChange(uint8_t, uint8_t) override {}
-    void sendAfterTouch(uint8_t, uint8_t) override {}
-    void sendPolyPressure(uint8_t, uint8_t, uint8_t) override {}
-    void sendPitchBend(int, uint8_t) override {}
-    void sendNoteOn(uint8_t, uint8_t, uint8_t) override {}
-    void sendNoteOff(uint8_t, uint8_t, uint8_t) override {}
-    void init() override {}
-    void setReceiveActions(MidiReceiveActions*) override {}
-    void setReceiveNoteOnAction(void (*)(uint8_t, uint8_t, uint8_t)) override {}
-};
-
-class UsbMidiApple : public UsbMidi
-{
-  public:
-    bool isReadAvailable() override { return false; }
-    void read() override {}
-    void sendRealTime(MessageType) override {}
-    void sendControlChange(uint8_t, uint8_t, uint8_t) override {}
-    void sendProgramChange(uint8_t, uint8_t) override {}
-    void sendAfterTouch(uint8_t, uint8_t) override {}
-    void sendPolyPressure(uint8_t, uint8_t, uint8_t) override {}
-    void sendPitchBend(int, uint8_t) override {}
-    void sendNoteOn(uint8_t, uint8_t, uint8_t) override {}
-    void sendNoteOff(uint8_t, uint8_t, uint8_t) override {}
-    void setReceiveActions(MidiReceiveActions*) override {}
-};
-
 // Same deliberate stub as the IMX build: CRC is not checked, and a real one would break
 // byte-identity of project files with Tracker+.
 class CrcCalculatorApple : public CrcCalculator

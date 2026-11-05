@@ -4,6 +4,12 @@
 #include <cstdint>
 
 // mach_absolute_time based clock; millis()/micros() count from construction.
+//
+// Frozen time on the render thread: between beginBlock(n) and endBlock() on a thread,
+// millis()/micros()/clockCycles() on THAT thread return the nominal start of audio block n
+// (n * 128 / 44100 s from the stream origin) and do not advance. Core code that measures
+// "elapsed since the block started" (mtMidi.cpp sendMidiClock) then sees 0 elapsed, so its delay
+// is exactly the sub-block offset. Other threads (tracker thread) see real time.
 class TimerApple : public Timer
 {
   public:
@@ -21,6 +27,15 @@ class TimerApple : public Timer
     void cancelMidiClock() override {}
 
     static uint32_t currentSubBlockOffsetUs();
+
+    // AudioRuntime's render thread, around each block's core calls (see above).
+    static void beginBlock(uint64_t blockIndex);
+    static void endBlock();
+    // True on a thread between beginBlock and endBlock; currentBlockIndex() is that block.
+    static bool inBlock();
+    static uint64_t currentBlockIndex();
+    // Nominal start of a block in microseconds from the stream origin (not wrapped to 32 bits).
+    static uint64_t blockStartUs(uint64_t blockIndex);
 
   private:
     uint64_t nowNs() const;

@@ -4,6 +4,7 @@
 #include "FileSystemPosix.h"
 #include "Ft812Model.h"
 #include "InputApple.h"
+#include "MidiCoreMidi.h"
 #include "Platform.h"
 #include "StubsApple.h"
 #include "TimerApple.h"
@@ -45,6 +46,7 @@ class PlatformApple final : public Platform
     InputApple& input() { return input_; }
     FileSystemPosix& fileSystem() { return fileSystem_; }
     Ft812Model& display() { return display_; }
+    MidiCoreMidi& midi() { return usbMidi_; } // the shared sender (destination, offset, output)
     PowerButtonCallback powerButtonCallback() const { return powerButtonCallback_; }
 
   private:
@@ -62,8 +64,8 @@ class PlatformApple final : public Platform
     LedsApple leds_;
     UsbApple usb_;
     UsbAudioApple usbAudio_;
-    UartMidiApple uartMidi_;
-    UsbMidiApple usbMidi_;
+    MidiCoreMidi usbMidi_;
+    MidiCoreMidi uartMidi_{ &usbMidi_ }; // shares usbMidi_'s CoreMIDI sender
     CrcCalculatorApple crc_;
     SystemInfo systemInfo_{ "apple" };
     PowerButtonCallback powerButtonCallback_ = nullptr;

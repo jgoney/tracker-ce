@@ -36,3 +36,9 @@ Changes to `core/` made for the Apple host build. *neutral* means the hardware c
   path when its descriptor is evicted from a 32-entry cache. If the file was renamed away or replaced
   by a different file since it was registered, streaming reads of it fail (silence) until the
   instrument is reloaded.
+
+## MIDI output
+
+- `platforms/apple/hal/MidiCoreMidi.{h,cpp}` replaces the inert MIDI placeholders. It publishes the virtual source "Tracker CE (unofficial)" and can also send to one selected CoreMIDI destination (`listDestinations()`, `selectDestination(idx)`). MIDI input is not implemented.
+- Timing: events produced during an audio block are stamped from the block index and sub-block offset through the latest Core Audio cycle mapping, plus the output latency and a user offset (-50..+50 ms, default 0). While a block renders, `TimerApple::micros()/millis()` on the render thread are frozen at the block's nominal start so `mtMidi.cpp` computes the exact sub-block delay. Events sent from the tracker thread (UI previews) are stamped now + output latency.
+- **Converter fallback.** When the audio device is not at 44.1 kHz, `CoreAudioOutput` runs an AudioConverter whose own delay is not part of `outputLatencySeconds()`. MIDI timing is then late by that delay relative to audio (a message is logged once). Use the user offset to compensate.

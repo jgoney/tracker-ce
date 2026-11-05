@@ -98,6 +98,7 @@ add_library(TrackerApple STATIC
     hal/VirtualSectorMap.cpp
     hal/PlatformApple.cpp
     hal/TimerApple.cpp
+    hal/MidiCoreMidi.cpp
     hal/InputApple.cpp
     hal/StubsApple.cpp
     hal/interrupts_apple.cpp
@@ -113,7 +114,7 @@ target_include_directories(TrackerApple PUBLIC hal display runtime)
 # ImageIO/CoreGraphics: CMD_LOADIMAGE JPEG/PNG decoding only (also available on iOS).
 target_link_libraries(TrackerApple PUBLIC TrackerCore
     "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation"
-    "-framework CoreAudio" "-framework AudioToolbox")
+    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreMIDI")
 target_compile_options(TrackerApple PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
 
@@ -140,6 +141,12 @@ add_executable(coreaudio_tests tests/test_coreaudio.cpp)
 target_compile_options(coreaudio_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
 target_link_libraries(coreaudio_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
 option(TRACKERCE_HW_TESTS "Register the audio-hardware tests with ctest" OFF)
+
+# CoreMIDI output: timestamp math, frozen render-thread time, in-process virtual endpoints.
+# Defines its own counting operator new (does not link the allocation guard).
+add_executable(midi_tests tests/test_midi_timing.cpp)
+target_compile_options(midi_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(midi_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
 
 # Whole-core headless boot + platform tests (smoke, boot, input, config, synth round trip).
 add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
@@ -173,6 +180,7 @@ add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
 add_test(NAME display_tests COMMAND display_tests)
 add_test(NAME runtime_tests COMMAND runtime_tests)
 add_test(NAME coreaudio_logic_tests COMMAND coreaudio_logic_tests)
+add_test(NAME midi_tests COMMAND midi_tests)
 # Needs an audio output device: only with -DTRACKERCE_HW_TESTS=ON; then `ctest -L hardware`
 # runs it and `ctest -LE hardware` skips it.
 if(TRACKERCE_HW_TESTS)

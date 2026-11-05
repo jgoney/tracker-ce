@@ -256,10 +256,10 @@ void AudioRuntime::renderOneBlock()
     }
 
     const uint64_t block = nextBlockIndex_;
-    // ---- Task 8 (ruling R2): TimerApple::beginBlock(block) goes here ----
+    TimerApple::beginBlock(block);
     tracker_->updateInputAudioBuffers(zeroI2s_, zeroUsb_, (int)kBlockFrames); // as on IMX
     tracker_->updateAudioBuffers(blockL_, blockR_, (int)kBlockFrames);
-    // ---- Task 8 (ruling R2): TimerApple::endBlock() goes here ----
+    TimerApple::endBlock();
 
     if (kr == KERN_SUCCESS)
         thread_resume(trackerPort_);

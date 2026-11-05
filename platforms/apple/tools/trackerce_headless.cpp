@@ -13,6 +13,10 @@
 // --device ID [--channels L,R] sends --audio-seconds to a Core Audio device (see --list-devices)
 // instead of the simulated IOProc. Prints the device latency, IOProc cycles and underruns.
 //
+// --midi-monitor (with --audio-seconds and --device) enables USB clock out, attaches the MIDI
+// timing to the output, listens to the published "Tracker CE (unofficial)" source in-process and
+// prints the 0xF8 count and spacing seen (24 ppqn: 20.8 ms at 120 BPM).
+//
 //   trackerce-headless --list-devices
 //   trackerce-headless --tone S [--device ID] [--channels L,R]
 //
@@ -24,8 +28,15 @@
 #include "CpuRaster.h"
 #include "PlatformApple.h"
 #include "Tracker.h"
+#include "mtMidi.h"
+#include "mtStructs.h"
 
+#include <Block.h>
+#include <CoreMIDI/CoreMIDI.h>
+#include <algorithm>
 #include <chrono>
+#include <mutex>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -80,6 +91,80 @@ class ToneTracker final : public Tracker
 
   private:
     double phase_ = 0;
+};
+
+// Listens to our published MIDI source and records when each 0xF8 clock arrived.
+struct MidiMonitor
+{
+    MIDIClientRef client = 0;
+    MIDIPortRef port = 0;
+    std::mutex m;
+    std::vector<uint64_t> clocks; // mach host time of arrival
+    uint64_t other = 0;
+
+    ~MidiMonitor()
+    {
+        if (client)
+            MIDIClientDispose(client); // ends the callbacks before m is destroyed
+    }
+
+    bool start()
+    {
+        if (MIDIClientCreate(CFSTR("headless monitor"), nullptr, nullptr, &client) != noErr)
+            return false;
+        MIDIReceiveBlock blk = (MIDIReceiveBlock)Block_copy(^(const MIDIEventList* list, void*) {
+          const uint64_t now = mach_absolute_time();
+          const MIDIEventPacket* p = &list->packet[0];
+          for (UInt32 i = 0; i < list->numPackets; i++)
+          {
+              for (UInt32 w = 0; w < p->wordCount; w++)
+              {
+                  std::lock_guard<std::mutex> g(m);
+                  if (p->words[w] == 0x10F80000u)
+                      clocks.push_back(now);
+                  else
+                      other++;
+              }
+              p = MIDIEventPacketNext(p);
+          }
+        });
+        if (MIDIInputPortCreateWithProtocol(client, CFSTR("in"), kMIDIProtocol_1_0, &port, blk) != noErr)
+            return false;
+        for (ItemCount i = 0; i < MIDIGetNumberOfSources(); i++)
+        {
+            CFStringRef n = nullptr;
+            MIDIObjectGetStringProperty(MIDIGetSource(i), kMIDIPropertyName, &n);
+            char buf[128] = {};
+            if (n)
+            {
+                CFStringGetCString(n, buf, sizeof buf, kCFStringEncodingUTF8);
+                CFRelease(n);
+            }
+            if (!std::strcmp(buf, "Tracker CE (unofficial)"))
+                return MIDIPortConnectSource(port, MIDIGetSource(i), nullptr) == noErr;
+        }
+        return false;
+    }
+
+    void report()
+    {
+        std::lock_guard<std::mutex> g(m);
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        std::printf("midi monitor: %zu clocks, %llu other messages\n", clocks.size(), (unsigned long long)other);
+        if (clocks.size() < 3)
+            return;
+        std::vector<double> d;
+        for (size_t i = 1; i < clocks.size(); i++)
+            d.push_back((double)(clocks[i] - clocks[i - 1]) * tb.numer / tb.denom / 1e6);
+        std::sort(d.begin(), d.end());
+        double mean = 0;
+        for (double v : d)
+            mean += v;
+        mean /= d.size();
+        std::printf("clock spacing ms: mean %.3f  min %.3f  median %.3f  max %.3f\n",
+                    mean, d.front(), d[d.size() / 2], d.back());
+    }
 };
 
 // Opens `deviceId` (0: the default output) on the requested channels and reports it.
@@ -142,6 +227,7 @@ int main(int argc, char** argv)
     double audioSeconds = 0;
     double toneSeconds = 0;
     bool listDevices = false;
+    bool midiMonitor = false;
     uint32_t deviceId = 0;
     bool haveDevice = false;
     int leftCh = 0, rightCh = 1;
@@ -161,6 +247,8 @@ int main(int argc, char** argv)
             audioSeconds = std::strtod(argv[++i], nullptr);
         else if (!std::strcmp(argv[i], "--tone") && hasValue)
             toneSeconds = std::strtod(argv[++i], nullptr);
+        else if (!std::strcmp(argv[i], "--midi-monitor"))
+            midiMonitor = true;
         else if (!std::strcmp(argv[i], "--no-fast-exit"))
             gFastExit = false;
         else if (!std::strcmp(argv[i], "--list-devices"))
@@ -228,11 +316,15 @@ int main(int argc, char** argv)
         rt.start(); // boots the core on the tracker thread
         float peak = 0;
         CoreAudioOutput out(rt);
+        MidiMonitor monitor;
         std::thread io;
         if (haveDevice)
         {
             if (!openOutput(out, deviceId, leftCh, rightCh))
                 return 1;
+            platform.midi().attachOutput(out); // before start(): onCycle is not synchronised
+            if (midiMonitor && !monitor.start())
+                std::fprintf(stderr, "midi monitor: cannot connect to the virtual source\n");
             out.start();
             io = std::thread([&] { std::this_thread::sleep_for(std::chrono::duration<double>(audioSeconds)); });
         }
@@ -241,6 +333,8 @@ int main(int argc, char** argv)
         if (audioSeconds > 3.5)
         {
             std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (midiMonitor)
+                mtConfig.midi.clkOut = clockOut_usb;
             platform.input().post({ InputEvent::Button, 23, true, 0 }); // interfaceButtonPlay
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             platform.input().post({ InputEvent::Button, 23, false, 0 });
@@ -248,6 +342,9 @@ int main(int argc, char** argv)
         io.join();
         out.stop();
         rt.stop();
+        platform.midi().detachOutput(out);
+        if (midiMonitor)
+            monitor.report();
         if (haveDevice)
             std::printf("device: %llu IOProc cycles\n", (unsigned long long)out.cycles());
         std::printf("audio: %.1f s, %llu blocks rendered, %llu underruns, peak %.4f\n",
