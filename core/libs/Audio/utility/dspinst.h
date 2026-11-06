@@ -29,6 +29,109 @@
 
 #include <stdint.h>
 
+#if defined(PLATFORM_APPLE)
+// Portable C equivalents of the Cortex-M DSP instructions, for the host build.
+// Each follows the ARM instruction semantics; the Cortex-M code below is untouched.
+static inline int32_t dspinst_lo16(uint32_t v) { return (int16_t)(v & 0xFFFF); }
+static inline int32_t dspinst_hi16(uint32_t v) { return (int16_t)(v >> 16); }
+static inline int32_t dspinst_sat32(int64_t v)
+{
+    return v > INT32_MAX ? INT32_MAX : (v < INT32_MIN ? INT32_MIN : (int32_t)v);
+}
+static inline int32_t dspinst_sat16(int32_t v) { return v > 32767 ? 32767 : (v < -32768 ? -32768 : v); }
+
+static inline int32_t signed_saturate_rshift(int32_t val, int bits, int rshift)
+{
+    int32_t out = val >> rshift;
+    int32_t max = (int32_t)(1u << (bits - 1));
+    return out > max - 1 ? max - 1 : (out < -max ? -max : out);
+}
+static inline int16_t saturate16(int32_t val) { return (int16_t)dspinst_sat16(val); }
+static inline int32_t signed_multiply_32x16b(int32_t a, uint32_t b) { return (int32_t)(((int64_t)a * dspinst_lo16(b)) >> 16); }
+static inline int32_t signed_multiply_32x16t(int32_t a, uint32_t b) { return (int32_t)(((int64_t)a * dspinst_hi16(b)) >> 16); }
+static inline int32_t multiply_32x32_rshift32(int32_t a, int32_t b) { return (int32_t)(((int64_t)a * b) >> 32); }
+static inline int32_t multiply_32x32_rshift32_rounded(int32_t a, int32_t b)
+{
+    return (int32_t)((((int64_t)a * b) + 0x80000000LL) >> 32);
+}
+static inline int32_t multiply_accumulate_32x32_rshift32_rounded(int32_t sum, int32_t a, int32_t b)
+{
+    return (int32_t)((int64_t)(((uint64_t)(int64_t)sum << 32) + (uint64_t)((int64_t)a * b) + 0x80000000ULL) >> 32);
+}
+static inline int32_t multiply_subtract_32x32_rshift32_rounded(int32_t sum, int32_t a, int32_t b)
+{
+    return (int32_t)((int64_t)(((uint64_t)(int64_t)sum << 32) - (uint64_t)((int64_t)a * b) + 0x80000000ULL) >> 32);
+}
+static inline uint32_t pack_16t_16t(int32_t a, int32_t b) { return ((uint32_t)a & 0xFFFF0000u) | ((uint32_t)b >> 16); }
+static inline uint32_t pack_16t_16b(int32_t a, int32_t b) { return ((uint32_t)a & 0xFFFF0000u) | ((uint32_t)b & 0xFFFFu); }
+static inline uint32_t pack_16b_16b(int32_t a, int32_t b) { return ((uint32_t)a << 16) | ((uint32_t)b & 0xFFFFu); }
+static inline uint32_t signed_add_16_and_16(uint32_t a, uint32_t b)
+{
+    uint32_t lo = (uint16_t)dspinst_sat16(dspinst_lo16(a) + dspinst_lo16(b));
+    uint32_t hi = (uint16_t)dspinst_sat16(dspinst_hi16(a) + dspinst_hi16(b));
+    return (hi << 16) | lo;
+}
+static inline int32_t signed_subtract_16_and_16(int32_t a, int32_t b)
+{
+    uint32_t lo = (uint16_t)dspinst_sat16(dspinst_lo16(a) - dspinst_lo16(b));
+    uint32_t hi = (uint16_t)dspinst_sat16(dspinst_hi16(a) - dspinst_hi16(b));
+    return (int32_t)((hi << 16) | lo);
+}
+static inline int32_t signed_halving_add_16_and_16(int32_t a, int32_t b)
+{
+    uint32_t lo = (uint16_t)((dspinst_lo16(a) + dspinst_lo16(b)) >> 1);
+    uint32_t hi = (uint16_t)((dspinst_hi16(a) + dspinst_hi16(b)) >> 1);
+    return (int32_t)((hi << 16) | lo);
+}
+static inline int32_t signed_halving_subtract_16_and_16(int32_t a, int32_t b)
+{
+    uint32_t lo = (uint16_t)((dspinst_lo16(a) - dspinst_lo16(b)) >> 1);
+    uint32_t hi = (uint16_t)((dspinst_hi16(a) - dspinst_hi16(b)) >> 1);
+    return (int32_t)((hi << 16) | lo);
+}
+static inline int32_t signed_multiply_accumulate_32x16b(int32_t sum, int32_t a, uint32_t b)
+{
+    return (int32_t)(sum + (((int64_t)a * dspinst_lo16(b)) >> 16));
+}
+static inline int32_t signed_multiply_accumulate_32x16t(int32_t sum, int32_t a, uint32_t b)
+{
+    return (int32_t)(sum + (((int64_t)a * dspinst_hi16(b)) >> 16));
+}
+static inline uint32_t logical_and(uint32_t a, uint32_t b) { return a & b; }
+static inline int32_t multiply_16tx16t_add_16bx16b(uint32_t a, uint32_t b)
+{
+    return (int32_t)((uint32_t)(dspinst_lo16(a) * dspinst_lo16(b)) + (uint32_t)(dspinst_hi16(a) * dspinst_hi16(b)));
+}
+static inline int32_t multiply_16tx16b_add_16bx16t(uint32_t a, uint32_t b)
+{
+    return (int32_t)((uint32_t)(dspinst_lo16(a) * dspinst_hi16(b)) + (uint32_t)(dspinst_hi16(a) * dspinst_lo16(b)));
+}
+static inline int64_t multiply_accumulate_16tx16t_add_16bx16b(int64_t sum, uint32_t a, uint32_t b)
+{
+    // each product is accumulated into the 64-bit sum separately (SMLALD)
+    return (int64_t)((uint64_t)sum + (uint64_t)(int64_t)(dspinst_lo16(a) * dspinst_lo16(b)) +
+                     (uint64_t)(int64_t)(dspinst_hi16(a) * dspinst_hi16(b)));
+}
+static inline int64_t multiply_accumulate_16tx16b_add_16bx16t(int64_t sum, uint32_t a, uint32_t b)
+{
+    return (int64_t)((uint64_t)sum + (uint64_t)(int64_t)(dspinst_lo16(a) * dspinst_hi16(b)) +
+                     (uint64_t)(int64_t)(dspinst_hi16(a) * dspinst_lo16(b)));
+}
+static inline int32_t multiply_16bx16b(uint32_t a, uint32_t b) { return dspinst_lo16(a) * dspinst_lo16(b); }
+static inline int32_t multiply_16bx16t(uint32_t a, uint32_t b) { return dspinst_lo16(a) * dspinst_hi16(b); }
+static inline int32_t multiply_16tx16b(uint32_t a, uint32_t b) { return dspinst_hi16(a) * dspinst_lo16(b); }
+static inline int32_t multiply_16tx16t(uint32_t a, uint32_t b) { return dspinst_hi16(a) * dspinst_hi16(b); }
+static inline int32_t substract_32_saturate(uint32_t a, uint32_t b)
+{
+    return dspinst_sat32((int64_t)(int32_t)a - (int32_t)b);
+}
+static inline uint32_t get_q_psr(void) { return 0; } // no sticky saturation flag on the host
+static inline void clr_q_psr(void) {}
+static inline int32_t multiply_32x32_rshift(int32_t x, int32_t y, int z) { return ((int64_t)x * y) >> (31 - z); }
+
+#else // Cortex-M
+
+
 // computes limit((val >> rshift), 2**bits)
 static inline int32_t signed_saturate_rshift(int32_t val, int bits, int rshift)
   __attribute__((always_inline, unused));
@@ -394,5 +497,7 @@ static inline int32_t multiply_32x32_rshift(int32_t x, int32_t y, int z)
     return ((int64_t)x * y) >> (31 - z); // not tested
 #endif
 }
+
+#endif // PLATFORM_APPLE
 
 #endif

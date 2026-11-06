@@ -101,11 +101,11 @@ static void recoveryProjectVersion1()
     memcpy(&tmp, receivedProject, sizeof(tmp));
 
     uint32_t bytesShift =
-      (uint32_t)&receivedProject->values.limiterAttack - (uint32_t)&receivedProject->values;
+      (uintptr_t)&receivedProject->values.limiterAttack - (uintptr_t)&receivedProject->values;
     uint32_t bytesToCopy = sizeof(strMtValues) - bytesShift - 1;
 
     memcpy((uint8_t*)&receivedProject->values.limiterAttack,
-           (uint8_t*)(((uint32_t)&tmp.values.limiterAttack) - 4),
+           (uint8_t*)(((uintptr_t)&tmp.values.limiterAttack) - 4),
            bytesToCopy);
     receivedProject->values.delayFeedback = 50;
     receivedProject->values.delayTime = 500;

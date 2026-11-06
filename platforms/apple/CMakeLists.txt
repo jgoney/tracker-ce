@@ -1,0 +1,226 @@
+cmake_minimum_required(VERSION 3.20)
+# macOS 14 minimum (the render-thread safety relies on chained fixups, macOS 12+).
+if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET 14.0 CACHE STRING "" FORCE)
+endif()
+project(TrackerApple LANGUAGES C CXX OBJCXX)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo) # NDEBUG, like the hardware builds
+endif()
+
+set(REPO_ROOT ${CMAKE_CURRENT_LIST_DIR}/../..)
+get_filename_component(REPO_ROOT ${REPO_ROOT} ABSOLUTE)
+set(CORE_DIR ${REPO_ROOT}/core)
+
+# Version defines come from the same place as the hardware builds (version.mk).
+# BUILD_TAG is not needed by core sources.
+set(FW_EDITION_NAME CE)
+file(STRINGS ${REPO_ROOT}/version.mk _ver_lines REGEX "^PLUS_VER_(MAJOR|MINOR|PATCH|BETA) *:=")
+foreach(_l IN LISTS _ver_lines)
+    if(_l MATCHES "PLUS_VER_([A-Z]+) *:= *([0-9]+)")
+        set(FW_VER_${CMAKE_MATCH_1} ${CMAKE_MATCH_2})
+    endif()
+endforeach()
+file(STRINGS ${REPO_ROOT}/version.mk _ed_line REGEX "^EDITION_NAME *:=")
+if(_ed_line MATCHES ":= *([A-Za-z0-9_]+)")
+    set(FW_EDITION_NAME ${CMAKE_MATCH_1})
+endif()
+
+set(CORE_DIRS source libs interface effector FileManager Exporter AudioEngine synth)
+set(CORE_CPP_SRCS)
+foreach(d IN LISTS CORE_DIRS)
+    file(GLOB_RECURSE _s CONFIGURE_DEPENDS ${CORE_DIR}/${d}/*.cpp)
+    list(APPEND CORE_CPP_SRCS ${_s})
+endforeach()
+list(REMOVE_ITEM CORE_CPP_SRCS ${CORE_DIR}/effector/ptfx_loader.cpp)
+file(GLOB_RECURSE CORE_C_SRCS CONFIGURE_DEPENDS ${CORE_DIR}/libs/*.c)
+
+add_library(TrackerCore STATIC ${CORE_CPP_SRCS} ${CORE_C_SRCS})
+
+set(CORE_INCLUDES
+    include config source synth libs libs/Audio libs/ElapsedMillis libs/SerialFlash libs/SPI
+    libs/Audio/utility libs/FT812 libs/fonts libs/NewDisplay interface effector FileManager
+    Exporter AudioEngine libs/Audio/Polyverb AudioEngine/ConstantValues AudioEngine/MasterEnhancer)
+foreach(i IN LISTS CORE_INCLUDES)
+    target_include_directories(TrackerCore PUBLIC ${CORE_DIR}/${i})
+endforeach()
+target_include_directories(TrackerCore PUBLIC
+    ${REPO_ROOT}/util/include ${REPO_ROOT}/util/3rdparty ${REPO_ROOT}/synth/include)
+
+target_compile_definitions(TrackerCore PUBLIC
+    PLATFORM_APPLE PLATFORM_IMX FEATURE_SYNTH USB_MIDI LAYOUT_US_ENGLISH
+    AUDIO_PERFORMANCE_INFO_ENABLED MEMORY_USAGE_INFO_ENABLED
+    FW_EDITION_NAME="${FW_EDITION_NAME}"
+    FW_VER_MAJOR=${FW_VER_MAJOR} FW_VER_MINOR=${FW_VER_MINOR}
+    FW_VER_PATCH=${FW_VER_PATCH} FW_VER_BETA=${FW_VER_BETA}
+    # util/3rdparty/tiny/optional.h: arm64 pointers are 64-bit with a high non-canonical
+    # range like x64, and libc++ has no _GLIBCXX_THROW_OR_ABORT (we build -fno-exceptions).
+    TINY_OPTIONAL_x64)
+# (function-like macro: has to go through options, add_compile_definitions drops it)
+target_compile_options(TrackerCore PUBLIC "-D_GLIBCXX_THROW_OR_ABORT(x)=__builtin_abort()")
+
+target_compile_options(TrackerCore PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;SHELL:-include cstdint;SHELL:-include cassert>")
+
+# --- Tests (Catch2 v3, vendored source tree) ---
+file(GLOB_RECURSE CATCH_SRCS CONFIGURE_DEPENDS ${REPO_ROOT}/util/3rdparty/catch2/*.cpp)
+list(FILTER CATCH_SRCS EXCLUDE REGEX "/benchmark/")
+add_library(catch2_vendored STATIC ${CATCH_SRCS})
+target_include_directories(catch2_vendored PUBLIC ${REPO_ROOT}/util/3rdparty)
+target_compile_options(catch2_vendored PRIVATE -std=gnu++20 -w)
+
+# dspinst.h host intrinsics: header + Catch2 only, built under UBSan (no recovery).
+add_executable(dsp_tests tests/test_dspinst.cpp)
+target_include_directories(dsp_tests PRIVATE ${CORE_DIR}/libs/Audio/utility)
+target_compile_definitions(dsp_tests PRIVATE PLATFORM_APPLE)
+target_compile_options(dsp_tests PRIVATE -std=gnu++20 -fsanitize=undefined -fno-sanitize-recover=all)
+target_link_options(dsp_tests PRIVATE -fsanitize=undefined)
+target_link_libraries(dsp_tests PRIVATE catch2_vendored)
+
+# --- fmt (vendored sources; core and the PolySynth SDK headers call fmt::format) ---
+add_library(fmt_vendored STATIC ${REPO_ROOT}/util/3rdparty/fmt/format.cc)
+target_include_directories(fmt_vendored PUBLIC ${REPO_ROOT}/util/3rdparty)
+target_compile_options(fmt_vendored PRIVATE -std=gnu++20 -w)
+target_link_libraries(TrackerCore PUBLIC fmt_vendored)
+
+# --- Silent PolySynth / ptfx stand-ins (see synth_stub/) ---
+add_library(PolySynthStub STATIC
+    synth_stub/PolySynthStub.cpp
+    synth_stub/PtfxStub.cpp)
+target_link_libraries(PolySynthStub PUBLIC TrackerCore)
+target_compile_options(PolySynthStub PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;SHELL:-include cstdint;SHELL:-include cassert>")
+
+add_executable(synth_stub_tests tests/test_synth_stub.cpp)
+target_compile_options(synth_stub_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(synth_stub_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
+
+# --- Apple HAL (PlatformApple + POSIX FileSystem + virtual sector map + display model) ---
+add_library(TrackerApple STATIC
+    hal/FileSystemPosix.cpp
+    hal/VirtualSectorMap.cpp
+    hal/PlatformApple.cpp
+    hal/TimerApple.cpp
+    hal/MidiCoreMidi.cpp
+    hal/InputApple.cpp
+    hal/StubsApple.cpp
+    hal/interrupts_apple.cpp
+    runtime/AudioRuntime.cpp
+    runtime/CoreAudioOutput.cpp
+    display/Ft812Model.cpp
+    display/CoproDecoder.cpp
+    display/DlDecoder.cpp
+    display/CpuRaster.cpp
+    display/Bitmaps.cpp
+    display/ImageDecode.cpp)
+target_include_directories(TrackerApple PUBLIC hal display runtime)
+# ImageIO/CoreGraphics: CMD_LOADIMAGE JPEG/PNG decoding only (also available on iOS).
+target_link_libraries(TrackerApple PUBLIC TrackerCore
+    "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation"
+    "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreMIDI")
+target_compile_options(TrackerApple PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
+
+# --- Metal renderer (shared with iOS: Foundation/Metal/ImageIO/CoreGraphics only, no AppKit) ---
+# The Metal toolchain (xcrun metal) is an optional Xcode download, so Shaders.metal is embedded as
+# a string and compiled at runtime with newLibraryWithSource (once per renderer, ~100 ms).
+file(READ ${CMAKE_CURRENT_LIST_DIR}/display/Shaders.metal TRACKER_METAL_SHADER_SRC)
+file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/ShadersSource.h
+     CONTENT "// Generated from display/Shaders.metal by CMake.\nstatic const char kShaderSource[] = R\"METAL(@TRACKER_METAL_SHADER_SRC@)METAL\";\n"
+     @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/display/Shaders.metal)
+add_library(TrackerMetal STATIC display/MetalRenderer.mm)
+target_include_directories(TrackerMetal PUBLIC display PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(TrackerMetal PUBLIC TrackerApple
+    "-framework Metal" "-framework Foundation" "-framework ImageIO" "-framework CoreGraphics")
+target_compile_options(TrackerMetal PRIVATE
+    -std=gnu++20 -fobjc-arc -fno-rtti -fno-exceptions -Wall -Wextra)
+
+# operator new hook for AudioRuntime's render-thread allocation guard. Linked only into binaries
+# that want it (a test may define its own operator new instead).
+add_library(TrackerAllocGuard OBJECT runtime/AllocGuardNew.cpp)
+target_link_libraries(TrackerAllocGuard PUBLIC TrackerCore)
+target_include_directories(TrackerAllocGuard PRIVATE hal display runtime)
+target_compile_options(TrackerAllocGuard PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra>")
+
+# AudioRuntime (tracker + render threads) against a fake Tracker.
+add_executable(runtime_tests tests/test_runtime.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
+target_compile_options(runtime_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(runtime_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# Core Audio output. coreaudio_logic_tests needs no hardware (routing, injected-hang fallback).
+# coreaudio_tests needs a real output device: registered with ctest only with
+# -DTRACKERCE_HW_TESTS=ON (label "hardware").
+add_executable(coreaudio_logic_tests tests/test_coreaudio_logic.cpp)
+target_compile_options(coreaudio_logic_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(coreaudio_logic_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+add_executable(coreaudio_tests tests/test_coreaudio.cpp)
+target_compile_options(coreaudio_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(coreaudio_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+option(TRACKERCE_HW_TESTS "Register the audio-hardware tests with ctest" OFF)
+
+# CoreMIDI output: timestamp math, frozen render-thread time, in-process virtual endpoints.
+# Defines its own counting operator new (does not link the allocation guard).
+add_executable(midi_tests tests/test_midi_timing.cpp)
+target_compile_options(midi_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(midi_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# Whole-core headless boot + platform tests (smoke, boot, input, config, synth round trip).
+add_executable(apple_tests tests/test_smoke.cpp tests/test_boot.cpp)
+target_compile_options(apple_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(apple_tests PRIVATE PolySynthStub TrackerApple TrackerCore catch2_vendored)
+
+# Headless runner: boots the core, dumps the last frame (--screenshot), runs it under AudioRuntime
+# (--audio-seconds), --tone, --metal (Metal render to PNG).
+add_executable(trackerce-headless tools/trackerce_headless.cpp $<TARGET_OBJECTS:TrackerAllocGuard>)
+target_compile_options(trackerce-headless PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20;-fno-rtti;-fno-exceptions;-Wall;-Wextra;SHELL:-include cstdint>")
+target_link_libraries(trackerce-headless PRIVATE PolySynthStub TrackerMetal TrackerApple TrackerCore)
+
+# FT812 model: coprocessor execution, display-list decoding, reference rasteriser.
+add_executable(display_tests tests/test_display_decode.cpp)
+target_compile_options(display_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(display_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# Metal renderer against CpuRaster goldens (tests/golden/*.png; a missing one is written and fails).
+add_executable(render_tests tests/test_render_golden.mm)
+target_compile_options(render_tests PRIVATE -std=gnu++20 -fobjc-arc "SHELL:-include cstdint")
+target_compile_definitions(render_tests PRIVATE
+    GOLDEN_DIR="${CMAKE_CURRENT_LIST_DIR}/tests/golden"
+    RENDER_OUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/render_out")
+target_link_libraries(render_tests PRIVATE TrackerMetal TrackerApple TrackerCore catch2_vendored)
+
+add_executable(filesystem_tests tests/test_filesystem.cpp)
+target_compile_options(filesystem_tests PRIVATE -std=gnu++20 "SHELL:-include cstdint")
+target_link_libraries(filesystem_tests PRIVATE TrackerApple TrackerCore catch2_vendored)
+
+# --- ctest ---
+enable_testing()
+add_test(NAME dsp_tests COMMAND dsp_tests)
+add_test(NAME synth_stub_tests COMMAND synth_stub_tests)
+add_test(NAME filesystem_tests COMMAND filesystem_tests)
+add_test(NAME apple_tests COMMAND apple_tests)
+# Wall-clock boot to the main UI (~4 s), alone in its own process; hidden from apple_tests.
+add_test(NAME apple_boot_frames COMMAND apple_tests "boot produces frames")
+add_test(NAME display_tests COMMAND display_tests)
+add_test(NAME render_tests COMMAND render_tests)
+add_test(NAME runtime_tests COMMAND runtime_tests)
+add_test(NAME coreaudio_logic_tests COMMAND coreaudio_logic_tests)
+add_test(NAME midi_tests COMMAND midi_tests)
+# Needs an audio output device: only with -DTRACKERCE_HW_TESTS=ON; then `ctest -L hardware`
+# runs it and `ctest -LE hardware` skips it.
+if(TRACKERCE_HW_TESTS)
+    add_test(NAME coreaudio_tests COMMAND coreaudio_tests "[hardware]")
+    set_tests_properties(coreaudio_tests PROPERTIES LABELS hardware)
+endif()
+
+# --- The Mac app (SwiftUI/AppKit only under app/): build/<dir>/app/Tracker CE (unofficial).app ---
+include(CheckLanguage)
+check_language(Swift)
+if(CMAKE_Swift_COMPILER)
+    add_subdirectory(app)
+else()
+    message(STATUS "Swift compiler not found: the Mac app is not built")
+endif()

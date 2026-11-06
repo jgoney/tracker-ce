@@ -164,4 +164,7 @@ AUDIO_CORE_FLASH audio_block_t* AudioPlayMemory::updateWavetable()
 
         return block;
     }
+    // unreachable: playing is only ever 0 or 1. Mirrors the !playing branch.
+    release(block);
+    return nullptr;
 }

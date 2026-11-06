@@ -18,11 +18,19 @@
 #include <cr_section_macros.h>
 
 //-----------------------------------  EXTERNAL RAM CONFIGURATION --------------------------------
+#if defined(PLATFORM_APPLE)
+// Mach-O rejects ELF section names; the host just uses ordinary static storage.
+#define EXT_RAM_ATTR(sec) __attribute__((used))
+#define EXT_RAM_ATTR_ALIGNED(sec, align) __attribute__((aligned(align), used))
+#else
+#define EXT_RAM_ATTR(sec) __attribute__((section(sec), used))
+#define EXT_RAM_ATTR_ALIGNED(sec, align) __attribute__((section(sec), aligned(align), used))
+#endif
 // clang-format off
-__attribute__((section(".sample_memory"), used)) int16_t externalRamSampleMemory[SAMPLE_MEMORY_SIZE / 2];
-__attribute__((section(".delay_memory"), used)) int16_t externalRamDelayBuff[DELAY_MEMORY_SIZE / 2];
-__attribute__((section(".reverb_memory"), used)) uint16_t externalRamReverbBuff[REVERB_MEMORY_SIZE / 2];
-__attribute__((section(".scratch_memory"), aligned(32), used)) uint8_t externalRamScratchBuff[SHARED_SCRATCH_MEMORY_SIZE];
+EXT_RAM_ATTR(".sample_memory") int16_t externalRamSampleMemory[SAMPLE_MEMORY_SIZE / 2];
+EXT_RAM_ATTR(".delay_memory") int16_t externalRamDelayBuff[DELAY_MEMORY_SIZE / 2];
+EXT_RAM_ATTR(".reverb_memory") uint16_t externalRamReverbBuff[REVERB_MEMORY_SIZE / 2];
+EXT_RAM_ATTR_ALIGNED(".scratch_memory", 32) uint8_t externalRamScratchBuff[SHARED_SCRATCH_MEMORY_SIZE];
 
 // clang-format on
 int16_t* externalRamEffectsBuff = externalRamSampleMemory + (EDIT_BUFF_OFFSET / 2);

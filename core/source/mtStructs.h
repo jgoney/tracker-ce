@@ -594,6 +594,49 @@ enum SaturationType
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
+#if defined(PLATFORM_APPLE)
+#include <cassert>
+// strInstrument is stored on disk as raw bytes and its sample.address slot is 4 bytes on the
+// hardware. A 64-bit host pointer would change the layout (and the project file format), so on the
+// host the slot holds a 4-byte handle into externalRamSampleMemory instead: 0 = nullptr, otherwise
+// 1 + the int16_t index. It converts to and from int16_t* so call sites are unchanged.
+extern int16_t externalRamSampleMemory[];
+class SampleAddress
+{
+  public:
+    SampleAddress() = default;
+    SampleAddress(int16_t* p) { set(p); }
+    SampleAddress& operator=(int16_t* p)
+    {
+        set(p);
+        return *this;
+    }
+    operator int16_t*() const { return slot == 0 ? nullptr : externalRamSampleMemory + (slot - 1); }
+    template<typename T>
+    explicit operator T*() const
+    {
+        return reinterpret_cast<T*>(static_cast<int16_t*>(*this));
+    }
+
+  private:
+    void set(int16_t* p)
+    {
+        if (p == nullptr)
+        {
+            slot = 0;
+            return;
+        }
+        assert(p >= externalRamSampleMemory && p - externalRamSampleMemory < SAMPLE_MEMORY_SIZE);
+        slot = static_cast<uint32_t>(p - externalRamSampleMemory) + 1;
+    }
+    uint32_t slot;
+};
+using SampleAddressT = SampleAddress;
+#else
+using SampleAddressT = int16_t*;
+#endif
+
+//----------------------------------------------------------------------------------
 struct strInstrument
 {
     uint8_t isActive;
@@ -603,7 +646,7 @@ struct strInstrument
         uint8_t type; //;
         char file_name[32];
 
-        int16_t* address;
+        SampleAddressT address;
         uint32_t length; // = 0;
 
         uint16_t wavetable_window_size; // = 2048;

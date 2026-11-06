@@ -4,7 +4,9 @@
 #include "cr_mtb_buffer.h"
 
 extern uint16_t externalRamReverbBuff[];
-#ifdef PLATFORM_IMX
+#if defined(PLATFORM_APPLE)
+static uint16_t internalRamReverbBuff[16384]; // no ELF sections on Mach-O
+#elif defined(PLATFORM_IMX)
 static uint16_t internalRamReverbBuff[16384] __attribute__((section(".noinit")));
 #else
 static __NOINIT(EXTERNAL_RAM) uint16_t internalRamReverbBuff[16384];

@@ -1418,9 +1418,9 @@ static void functDeleteBackspace(uint8_t state)
                 switch (SR->selectedPlace)
                 {
                     case 0: SR->setDefaultSource(); break;
-                    case SR->RADIO_COL1: SR->setDefaultRadioFreq(); break;
-                    case SR->GAIN_COL: SR->setDefaultGain(); break;
-                    case SR->MONITOR_COL: SR->setDefaultMonitorEnable(); break;
+                    case cSampleRecorder::RADIO_COL1: SR->setDefaultRadioFreq(); break;
+                    case cSampleRecorder::GAIN_COL: SR->setDefaultGain(); break;
+                    case cSampleRecorder::MONITOR_COL: SR->setDefaultMonitorEnable(); break;
                     default: break;
                 }
             }
@@ -1986,11 +1986,11 @@ static void functEncoder(int16_t value)
                 SR->changeSourceSelection(interfaceGlobals.invertValForList ? -value : value);
                 break;
             }
-            case SR->RADIO_COL1: SR->changeRadioFreqBar(value); break;
-            case SR->RADIO_COL2: break;
-            case SR->RADIO_COL3: break;
-            case SR->GAIN_COL: SR->changeGainBar(value); break;
-            case SR->MONITOR_COL:
+            case cSampleRecorder::RADIO_COL1: SR->changeRadioFreqBar(value); break;
+            case cSampleRecorder::RADIO_COL2: break;
+            case cSampleRecorder::RADIO_COL3: break;
+            case cSampleRecorder::GAIN_COL: SR->changeGainBar(value); break;
+            case cSampleRecorder::MONITOR_COL:
             {
                 SR->changeMonitorSelection(interfaceGlobals.invertValForList ? -value : value);
                 break;
@@ -2061,8 +2061,8 @@ static void functLeft()
     {
         switch (SR->selectedPlace)
         {
-            case SR->LEVEL_COL:
-            case SR->GAIN_COL:
+            case cSampleRecorder::LEVEL_COL:
+            case cSampleRecorder::GAIN_COL:
             {
                 if (SR->recorderConfig.source == cSampleRecorder::sourceTypeRadio)
                     SR->selectedPlace = SR->RADIO_COL1;
@@ -2070,10 +2070,10 @@ static void functLeft()
                     SR->selectedPlace = 0;
                 break;
             }
-            case SR->RADIO_COL1:
-            case SR->RADIO_COL2:
-            case SR->RADIO_COL3: SR->selectedPlace = 0; break;
-            case SR->MONITOR_COL: SR->selectedPlace = SR->GAIN_COL; break;
+            case cSampleRecorder::RADIO_COL1:
+            case cSampleRecorder::RADIO_COL2:
+            case cSampleRecorder::RADIO_COL3: SR->selectedPlace = 0; break;
+            case cSampleRecorder::MONITOR_COL: SR->selectedPlace = SR->GAIN_COL; break;
             default: SR->selectedPlace = 0; break;
         }
 
@@ -2136,7 +2136,7 @@ static void functRight()
                     SR->selectedPlace = SR->GAIN_COL;
                 break;
             }
-            case SR->GAIN_COL:
+            case cSampleRecorder::GAIN_COL:
             {
                 if (SR->isMonitorListVisible())
                 {
@@ -2144,11 +2144,11 @@ static void functRight()
                 }
                 break;
             }
-            case SR->RADIO_COL1:
-            case SR->RADIO_COL2:
-            case SR->RADIO_COL3:
-            case SR->LEVEL_COL: SR->selectedPlace = SR->GAIN_COL; break;
-            case SR->MONITOR_COL: break;
+            case cSampleRecorder::RADIO_COL1:
+            case cSampleRecorder::RADIO_COL2:
+            case cSampleRecorder::RADIO_COL3:
+            case cSampleRecorder::LEVEL_COL: SR->selectedPlace = SR->GAIN_COL; break;
+            case cSampleRecorder::MONITOR_COL: break;
             default: SR->selectedPlace = SR->MONITOR_COL; break;
         }
 
@@ -2204,11 +2204,11 @@ static void functUp()
         switch (SR->selectedPlace)
         {
             case 0: SR->changeSourceSelection(-1); break;
-            case SR->RADIO_COL1: SR->changeRadioFreqBar(1); break;
-            case SR->RADIO_COL2: break;
-            case SR->RADIO_COL3: break;
-            case SR->GAIN_COL: SR->changeGainBar(1); break;
-            case SR->MONITOR_COL: SR->changeMonitorSelection(-1); break;
+            case cSampleRecorder::RADIO_COL1: SR->changeRadioFreqBar(1); break;
+            case cSampleRecorder::RADIO_COL2: break;
+            case cSampleRecorder::RADIO_COL3: break;
+            case cSampleRecorder::GAIN_COL: SR->changeGainBar(1); break;
+            case cSampleRecorder::MONITOR_COL: SR->changeMonitorSelection(-1); break;
             default: break;
         }
     }
@@ -2246,11 +2246,11 @@ static void functDown()
         switch (SR->selectedPlace)
         {
             case 0: SR->changeSourceSelection(1); break;
-            case SR->RADIO_COL1: SR->changeRadioFreqBar(-1); break;
-            case SR->RADIO_COL2: break;
-            case SR->RADIO_COL3: break;
-            case SR->GAIN_COL: SR->changeGainBar(-1); break;
-            case SR->MONITOR_COL: SR->changeMonitorSelection(1); break;
+            case cSampleRecorder::RADIO_COL1: SR->changeRadioFreqBar(-1); break;
+            case cSampleRecorder::RADIO_COL2: break;
+            case cSampleRecorder::RADIO_COL3: break;
+            case cSampleRecorder::GAIN_COL: SR->changeGainBar(-1); break;
+            case cSampleRecorder::MONITOR_COL: SR->changeMonitorSelection(1); break;
         }
     }
 }
